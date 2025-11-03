@@ -21,6 +21,9 @@ from vertexai.preview.language_models import TextEmbeddingModel
 from openpyxl import load_workbook
 from openpyxl.utils import range_boundaries
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # =========================
 # Config
 # =========================
@@ -29,8 +32,7 @@ LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
 APPLICATION_NAME = os.getenv("GOOGLE_CLOUD_APLICATION", "ai-api")
 vertex_init(project=PROJECT_ID, location=LOCATION)
 
-GEMINI_MODEL_ID = os.getenv("GEMINI_MODEL_ID", "gemini-1.5-pro-002")
-EMBED_MODEL_ID  = os.getenv("EMBED_MODEL_ID",  "text-embedding-004")
+GEMINI_MODEL_ID = os.getenv("GEMINI_MODEL_ID", "gemini-2.0-flash")
 
 # ---- Sua API no Render ----
 TASKS_API_BASE           = os.getenv("TASKS_API_BASE", "https://ache-flow-back.onrender.com").rstrip("/")
