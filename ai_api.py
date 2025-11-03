@@ -2,6 +2,7 @@
 import os, io, re, time, asyncio
 from typing import List, Optional, Dict, Any
 from urllib.parse import urlparse, parse_qs, unquote, quote, urljoin
+from datetime import datetime, timedelta
 
 import requests
 import httpx
@@ -297,7 +298,7 @@ def xlsx_bytes_to_dataframe_preserving_hyperlinks(xlsx_bytes: bytes) -> pd.DataF
 # =========================
 # Auth: obter e cachear token do /token
 # =========================
-_token_cache: Dict[str, Any] = {"access_token": None, "expires_at": 0}
+_token_cache: Dict[str, Any] = {"access_token": None, "expires_at": 0, "user_id": None}
 
 async def get_auth_header(client: httpx.AsyncClient) -> Dict[str, str]:
     bearer_env = os.getenv("TASKS_API_BEARER")
@@ -324,6 +325,7 @@ async def get_auth_header(client: httpx.AsyncClient) -> Dict[str, str]:
             payload = resp.json()
             access_token = payload.get("access_token") or payload.get("token") or payload.get("accessToken")
             expires_in  = int(payload.get("expires_in") or 3600)
+            _token_cache["user_id"] = payload.get("id") or _token_cache.get("user_id")
             if not access_token:
                 raise RuntimeError(f"Resposta de token sem access_token: {payload}")
             _token_cache["access_token"] = access_token
@@ -341,19 +343,40 @@ async def get_auth_header(client: httpx.AsyncClient) -> Dict[str, str]:
 class CreateTaskItem(BaseModel):
     titulo: str
     descricao: Optional[str] = None
-    responsavel: Optional[str] = None
-    deadline: Optional[str] = None
+    responsavel: Optional[str] = None   # nome/email da planilha
+    deadline: Optional[str] = None      # ex.: '5 dias'
+    doc_ref: Optional[str] = None       # link PDF p/ documento_referencia
+    prazo_data: Optional[str] = None    # YYYY-MM-DD (se houver coluna com data)
+
+async def create_task(client: httpx.AsyncClient, projeto_id: str, responsavel_id: str, item: CreateTaskItem) -> Dict[str, Any]:
+    url = f"{TASKS_API_BASE}{TASKS_API_TASKS_PATH}"
+    auth = await get_auth_header(client)
+    prazo = (item.prazo_data or "").strip() or duration_to_date(item.deadline)
+
+    payload = {
+        "nome": item.titulo,
+        "descricao": item.descricao,
+        "projeto_id": projeto_id,
+        "responsavel_id": responsavel_id,
+        "prazo": prazo,
+        "documento_referencia": item.doc_ref,
+        # prioridade/status têm defaults no schema
+    }
+
+    r = await client.post(url, json=payload, headers={**auth, "Content-Type": "application/json"}, timeout=TIMEOUT_S)
+    r.raise_for_status()
+    return r.json()
 
 # =========================
 # Integração com API tradicional
 # =========================
-async def ensure_project_exists_by_id(client: httpx.AsyncClient, projeto_id: int) -> bool:
+async def ensure_project_exists_by_id(client: httpx.AsyncClient, projeto_id: str) -> bool:
     url = f"{TASKS_API_BASE}{TASKS_API_PROJECTS_PATH}/{projeto_id}"
     auth = await get_auth_header(client)
     r = await client.get(url, headers=auth, timeout=TIMEOUT_S)
     return r.status_code == 200
 
-async def find_project_id_by_name(client: httpx.AsyncClient, projeto_nome: str) -> Optional[int]:
+async def find_project_id_by_name(client: httpx.AsyncClient, projeto_nome: str) -> Optional[str]:
     url = f"{TASKS_API_BASE}{TASKS_API_PROJECTS_PATH}"
     auth = await get_auth_header(client)
     r = await client.get(url, headers=auth, timeout=TIMEOUT_S)
@@ -363,34 +386,116 @@ async def find_project_id_by_name(client: httpx.AsyncClient, projeto_nome: str) 
         items = r.json()
         if isinstance(items, list):
             hit = next((p for p in items if str(p.get("nome")) == projeto_nome), None)
-            return hit.get("id") if hit else None
+            return (hit or {}).get("_id") if hit else None
     except Exception:
         return None
     return None
-
-async def create_task(client: httpx.AsyncClient, projeto_id: int, item: CreateTaskItem) -> Dict[str, Any]:
-    url = f"{TASKS_API_BASE}{TASKS_API_TASKS_PATH}"
+    
+async def create_project_api(
+    client: httpx.AsyncClient,
+    nome: str,
+    responsavel_id: str,
+    situacao: str,
+    prazo_yyyy_mm_dd: str,
+    descricao: Optional[str] = None,
+    categoria: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    POST /projetos — ProjetoCreate exige: nome, responsavel_id, situacao, prazo (date).
+    """
+    url = f"{TASKS_API_BASE}{TASKS_API_PROJECTS_PATH}"
     auth = await get_auth_header(client)
     payload = {
-        "projeto_id": projeto_id,
-        "titulo": item.titulo,
-        "descricao": item.descricao,
-        "responsavel": item.responsavel,
-        "deadline": item.deadline,
+        "nome": nome,
+        "responsavel_id": responsavel_id,
+        "situacao": situacao,
+        "prazo": prazo_yyyy_mm_dd,
     }
+    if descricao:
+        payload["descricao"] = descricao
+    if categoria:
+        payload["categoria"] = categoria
+
     r = await client.post(url, json=payload, headers={**auth, "Content-Type": "application/json"}, timeout=TIMEOUT_S)
     r.raise_for_status()
     return r.json()
+
+
+async def list_funcionarios(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
+    url = f"{TASKS_API_BASE}/funcionarios"
+    auth = await get_auth_header(client)
+    r = await client.get(url, headers=auth, timeout=TIMEOUT_S)
+    if r.status_code != 200:
+        return []
+    try:
+        data = r.json()
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+async def resolve_responsavel_id(client: httpx.AsyncClient, nome_ou_email: Optional[str]) -> Optional[str]:
+    """
+    Tenta casar por nome/email. Se não achar, usa o id que veio no /token (cache).
+    """
+    nome_ou_email = (nome_ou_email or "").strip()
+    if not nome_ou_email:
+        return _token_cache.get("user_id")
+
+    pessoas = await list_funcionarios(client)
+    key = nome_ou_email.lower()
+
+    # match por email
+    for p in pessoas:
+        email = str(p.get("email") or "").lower()
+        if email and email == key:
+            return p.get("_id")
+
+    # match por nome "exato" (case-insensitive)
+    for p in pessoas:
+        nome = str(p.get("nome") or "").lower()
+        sobrenome = str(p.get("sobrenome") or "").lower()
+        full = f"{nome} {sobrenome}".strip()
+        if full == key or nome == key:
+            return p.get("_id")
+
+    # fallback no próprio usuário do token
+    return _token_cache.get("user_id")
+
+def duration_to_date(duracao: Optional[str]) -> str:
+    """
+    Converte '5 dias' -> (hoje + 5). Retorna YYYY-MM-DD.
+    Se vazio/inesperado, usa hoje + 7.
+    """
+    base = datetime.utcnow().date()
+    try:
+        s = (duracao or "").strip().lower()
+        m = re.search(r"(\d+)", s)
+        n = int(m.group(1)) if m else 7
+    except Exception:
+        n = 7
+    return (base + timedelta(days=n)).isoformat()
 
 # =========================
 # Endpoint: importar tarefas via .xlsx
 # =========================
 @app.post("/tasks/from-xlsx")
 async def tasks_from_xlsx(
-    projeto_id: Optional[int] = Form(None),
+    projeto_id: Optional[str] = Form(None),
     projeto_nome: Optional[str] = Form(None),
+
+    # NOVO: criação de projeto (se não existir)
+    create_project_flag: int = Form(0),                 # 1 = cria se não achar
+    projeto_situacao: Optional[str] = Form(None),  # obrigatório se for criar
+    projeto_prazo: Optional[str] = Form(None),     # YYYY-MM-DD (ou vazio, usa duração padrão)
+    projeto_responsavel: Optional[str] = Form(None),  # nome/email p/ resolver responsável do projeto
+    projeto_descricao: Optional[str] = Form(None),
+    projeto_categoria: Optional[str] = Form(None),
+
+    # FONTE da planilha
     xlsx_url: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
+
+    # debug
     debug: int = Form(0),
 ):
     # normaliza xlsx_url
@@ -469,13 +574,33 @@ async def tasks_from_xlsx(
             first_trace = f"error: {e}"
 
     for _, row in df.iterrows():
-        preview.append({
-            "titulo": str(row["Nome"]),
-            "descricao": str(row.get("descricao_final") or ""),
-            "responsavel": str(row.get("Responsavel") or ""),
-            "deadline": str(row.get("Duração") or ""),
-        })
+        titulo = str(row["Nome"])
+        descricao_final = str(row.get("descricao_final") or "")
+        responsavel_txt = str(row.get("Responsavel") or "")
+        duracao_txt = str(row.get("Duração") or "")
+        doc_ref = str(row.get("Documento Referência") or "").strip()
 
+        # se existir coluna 'Prazo' já em data (YYYY-MM-DD), use
+        prazo_col = str(row.get("Prazo") or "").strip()
+        if prazo_col:
+            # tenta normalizar p/ YYYY-MM-DD
+            try:
+                # aceita dd/mm/yyyy também
+                if re.match(r"^\d{2}/\d{2}/\d{4}$", prazo_col):
+                    d, m, y = prazo_col.split("/")
+                    prazo_col = f"{y}-{m}-{d}"
+            except Exception:
+                pass
+
+        preview.append({
+            "titulo": titulo,
+            "descricao": descricao_final,
+            "responsavel": responsavel_txt,
+            "deadline": duracao_txt,
+            "doc_ref": doc_ref,
+            "prazo": prazo_col or None,
+        })
+            
     # se não veio projeto → só preview
     if projeto_id is None and not projeto_nome:
         resp = {
@@ -490,28 +615,53 @@ async def tasks_from_xlsx(
 
     # com projeto → atribui
     async with httpx.AsyncClient() as client:
-        # resolve projeto_id (por nome, se necessário)
-        resolved_project_id: Optional[int] = projeto_id
-        if resolved_project_id is None and projeto_nome:
+        # 1) resolver projeto
+        resolved_project_id: Optional[str] = projeto_id
+        if not resolved_project_id and projeto_nome:
             resolved_project_id = await find_project_id_by_name(client, projeto_nome)
 
-        if resolved_project_id is None:
-            return {"erro": "Projeto não encontrado (informe 'projeto_id' válido ou 'projeto_nome' existente)."}
+        if not resolved_project_id:
+            if create_project_flag:
+                # resolver responsavel do PROJETO; se não vier, usa o usuário do token
+                proj_resp_id = await resolve_responsavel_id(client, projeto_responsavel)
+                # prazo do projeto: se não vier data, usa hoje + 30 (exemplo)
+                proj_prazo = (projeto_prazo or "").strip() or (datetime.utcnow().date() + timedelta(days=30)).isoformat()
+                # situacao: se não vier, define 'em andamento' (ou outro estado da sua régua)
+                situacao = (projeto_situacao or "em andamento").strip()
+                # cria
+                proj = await create_project_api(
+                    client=client,
+                    nome=projeto_nome or "Projeto sem nome",
+                    responsavel_id=proj_resp_id,
+                    situacao=situacao,
+                    prazo_yyyy_mm_dd=proj_prazo,
+                    descricao=projeto_descricao,
+                    categoria=projeto_categoria,
+                )
+                resolved_project_id = proj.get("_id") or proj.get("id")
+            else:
+                return {"erro": "Projeto não encontrado. Informe 'projeto_id' (ou 'projeto_nome' existente) "
+                                "ou envie 'create_project_flag=1' + 'projeto_situacao' + 'projeto_prazo'."}
 
+        # dupla confirmação por ID
         ok = await ensure_project_exists_by_id(client, resolved_project_id)
         if not ok:
             return {"erro": f"Projeto {resolved_project_id} não encontrado na API tradicional."}
 
+        # 2) criar tarefas
         created = []
         for item in preview:
+            resp_id = await resolve_responsavel_id(client, item.get("responsavel"))
             payload = CreateTaskItem(
                 titulo=item["titulo"],
                 descricao=item["descricao"],
                 responsavel=item.get("responsavel") or None,
                 deadline=item.get("deadline") or None,
+                doc_ref=item.get("doc_ref") or None,
+                prazo_data=item.get("prazo") or None,
             )
             try:
-                created.append(await create_task(client, resolved_project_id, payload))
+                created.append(await create_task(client, resolved_project_id, resp_id, payload))
             except Exception as e:
                 created.append({"erro": str(e), "titulo": item["titulo"]})
 
