@@ -71,6 +71,22 @@ DEFAULT_TOP_K = 8
 # =========================
 app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="2.0.1")
 
+
+# Lista de domínios que podem acessar sua API
+# Adicione a URL do seu site quando ele estiver no ar
+origins = [
+    "http://localhost:5173", # Para desenvolvimento local
+    "https://ache-flow.vercel.app"
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,       # Permite origens específicas
+    allow_credentials=True,
+    allow_methods=["*"],         # Permite todos os métodos (GET, POST, etc.)
+    allow_headers=["*"],         # Permite todos os cabeçalhos (x-api-key, etc.)
+)
+
 # =========================
 # Segurança
 # =========================
