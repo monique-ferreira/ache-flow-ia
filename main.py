@@ -148,16 +148,25 @@ def sanitize_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
     if not doc: return doc
     out: Dict[str, Any] = {k: str(v) if isinstance(v, ObjectId) else v for k, v in doc.items()}
     return out
+# Em main.py, substitua a função mongo()
+
 def mongo():
-    if not MONGO_URI: raise RuntimeError("MONGO_URI não definido")
+    if not MONGO_URI: 
+        raise RuntimeError("MONGO_URI não foi definida")
     client = MongoClient(MONGO_URI)
     try:
+        # get_default_database() PEGA O DB DA PRÓPRIA URI.
+        # Ex: ...mongodb.net/acheflow_db? -> usa 'acheflow_db'
         db = client.get_default_database()
-        db_name = db.name if db else "acheflow"
-    except Exception:
-        db_name = "acheflow"
-    return client[db_name]
-
+        
+        # Forçamos uma checagem de conexão para garantir que a URI
+        # e as regras de Firewall do Atlas estão corretas.
+        db.command("ping") 
+        return db
+    except Exception as e:
+        # Se falhar, é provável que a URI esteja errada ou o IP do Cloud Run não esteja liberado
+        raise RuntimeError(f"Não foi possível conectar ao MongoDB. Verifique a MONGO_URI e o firewall do Atlas. Erro: {e}")
+    
 # =========================
 # Helpers de Download (PDF/XLSX)
 # (Omitidos por brevidade)
@@ -444,9 +453,11 @@ async def tasks_from_xlsx_logic(
 # Lógica da IA (do vertex_ai_service.py)
 # (Omitido por brevidade)
 # =========================
+# Em main.py, substitua a variável SYSTEM_PROMPT
+
 SYSTEM_PROMPT = """
 Você é o "Ache" — um assistente de produtividade virtual da plataforma Ache Flow.
-Sua missão é ajudar colaboradores(as) como {nome_usuario} a entender e gerenciar tarefas, projetos e prazos.
+Sua missão é ajudar colaboradores(as) como {nome_usuario} (email: {email_usuario}, id: {id_usuario}) a entender e gerenciar tarefas, projetos e prazos.
 ====================================================================
 REGRAS DE IMPORTAÇÃO (IMPORTANTE)
 ====================================================================
@@ -458,18 +469,18 @@ REGRAS DE IMPORTAÇÃO (IMPORTANTE)
 - Você DEVE perguntar ao usuário por **todas** as informações que estiverem faltando ANTES de chamar a ferramenta.
 - Exemplo de conversa:
     - Usuário: "cria um projeto pra mim com este arquivo: https://sharepoint.com/arquivo.xlsx"
-    - Você: "Claro! Para criar este projeto, eu só preciso de mais alguns detalhes: Qual será o nome do projeto? Qual a situação dele (ex: Em andamento)? Qual o prazo final (no formato AAAA-MM-DD)? E quem será o responsável (email ou ID)?"
-    - Usuário: "O nome é 'Projeto Teste', situação 'Em planejamento', prazo '2025-12-31' e o responsável é 'ana.silva@email.com'"
-    - (Agora sim você chama a ferramenta `import_project_from_url` com todos os dados)
+    - Você: "Claro! Para criar este projeto, eu só preciso de mais alguns detalhes: Qual será o nome do projeto? Qual a situação dele (ex: Em andamento)? Qual o prazo final (no formato DD-MM-AAAA)? E quem será o responsável (email ou ID)?"
+    - Usuário: "O nome é 'Projeto Teste', situação 'Em planejamento', prazo '31-12-2025' e eu serei o responsável."
+    - (Neste caso, você usará o {id_usuario} ou {email_usuario} como responsável e converterá a data para 2025-12-31 antes de chamar a ferramenta `import_project_from_url`)
 ====================================================================
 TOM E ESTILO DE RESPOSTA
 ====================================================================
 - Sempre fale em **português (PT-BR)**.
 - Seja simpático(a), humano(a), colaborativo(a) e positivo(a).
-- Fale diretamente com o(a) usuário(a) pelo nome, por exemplo: "Oi, {nome_usuario}!".
+- Fale diretamente com o(a) usuário(a) pelo nome (ex: "Oi, {nome_usuario}!"), mas **APENAS na primeira mensagem da conversa**. Não repita a saudação em todas as respostas.
 - Use linguagem clara, leve e natural.
 - Nunca use markdown, asteriscos (*), negrito, nem blocos de código.
-- **Seja proativo:** Se você tiver uma ferramenta que possa responder à pergunta (como list_all_projects ou list_projects_by_status), use-a imediatamente. Não peça permissão para usar ferramentas, apenas as use.
+- **NÃO PEÇA PERMISSÃO:** Você DEVE usar as ferramentas proativamente. Se uma pergunta pode ser respondida por uma ferramenta (como list_all_projects), USE A FERRAMENTA. Nunca pergunte "Quer que eu faça X?" ou "Posso buscar Y?". Apenas execute e retorne a resposta.
 ====================================================================
 CONHECIMENTO E DADOS DISPONÍVEIS
 ====================================================================
@@ -486,6 +497,15 @@ INTERPRETAÇÃO DE DATAS (BASE)
 ====================================================================
 - Hoje: {data_hoje}.
 - Intervalo de "este mês": {inicio_mes} até {fim_mes}.
+- **FORMATO DE DATA:** Sempre que pedir uma data ao usuário, peça no formato **DD-MM-AAAA**. Você deve converter internamente qualquer data DD-MM-AAAA para AAAA-MM-DD antes de usar nas ferramentas.
+====================================================================
+CONTEXTO DO USUÁRIO
+====================================================================
+- O usuário logado é: {nome_usuario}
+- O email dele(a) é: {email_usuario}
+- O ID dele(a) é: {id_usuario}
+- Se o usuário disser "eu serei o responsável", "me atribua", "para mim", etc., use o ID '{id_usuario}' como 'responsavel_id' nas ferramentas.
+- NUNCA peça o ID do usuário. Se precisar de outro responsável, peça o nome ou email.
 """
 def list_all_projects(top_k: int = 500) -> List[Dict[str, Any]]:
     return [sanitize_doc(x) for x in mongo()[COLL_PROJETOS].find({}).sort("prazo", 1).limit(top_k)]
@@ -589,20 +609,21 @@ async def exec_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "error": detail}
 def _normalize_answer(raw: str, nome_usuario: str) -> str:
     raw = re.sub(r"[*_`#>]+", "", raw).strip()
-    saud = f"Oi, {nome_usuario}! "
-    if not raw.lower().startswith(("oi", "olá", "ola")): raw = saud + raw
-    if all(sym not in raw for sym in ("🙂", "😊", "👋")): raw = raw.rstrip(".") + " 🙂"
+    if all(sym not in raw for sym in ("🙂", "😊", "👋")):
+        raw = raw.rstrip(".") + " 🙂"
     return raw
 def init_model(system_instruction: str) -> GenerativeModel:
     vertex_init(project=PROJECT_ID, location=LOCATION) 
     return GenerativeModel(GEMINI_MODEL_ID, system_instruction=system_instruction)
-async def chat_with_tools(user_msg: str, history: Optional[List[Dict[str, str]]] = None, nome_usuario: Optional[str] = None) -> Dict[str, Any]:
+async def chat_with_tools(user_msg: str, history: Optional[List[Dict[str, str]]] = None, nome_usuario: Optional[str] = None, email_usuario: Optional[str] = None, id_usuario: Optional[str] = None) -> Dict[str, Any]:
     # --- BUG CORRIGIDO AQUI ---
     data_hoje, (inicio_mes, fim_mes) = iso_date(today()), month_bounds(today())
     nome_usuario = nome_usuario or "você"
+    email_usuario = email_usuario or "email.desconhecido"
+    id_usuario = id_usuario or "id.desconhecido"
     system_prompt_filled = SYSTEM_PROMPT.format(
-        nome_usuario=nome_usuario, data_hoje=data_hoje,
-        inicio_mes=inicio_mes, fim_mes=fim_mes,
+        nome_usuario=nome_usuario, email_usuario=email_usuario, id_usuario=id_usuario,
+        data_hoje=data_hoje, inicio_mes=inicio_mes, fim_mes=fim_mes,
     )
     model = init_model(system_prompt_filled)
     contents: List[Content] = []
@@ -663,15 +684,25 @@ class ChatRequest(BaseModel):
     pergunta: str
     history: Optional[List[Dict[str, str]]] = None
     nome_usuario: Optional[str] = None
+    email_usuario: Optional[str] = None
+    id_usuario: Optional[str] = None
+
 @app.post("/ai/chat")
 async def ai_chat(req: ChatRequest, _=Depends(require_api_key)):
-    out = await chat_with_tools(req.pergunta, req.history, req.nome_usuario)
+    out = await chat_with_tools(
+        user_msg=req.pergunta, 
+        history=req.history, 
+        nome_usuario=req.nome_usuario,
+        email_usuario=req.email_usuario, # <-- ADICIONADO
+        id_usuario=req.id_usuario        # <-- ADICIONADO
+    )
     response_data = {
         "tipo_resposta": "TEXTO",
         "conteudo_texto": out.get("answer", "Desculpe, não consegui processar sua solicitação."),
         "dados": out.get("tool_steps")
     }
     return JSONResponse(response_data)
+
 @app.post("/tasks/from-xlsx")
 async def tasks_from_xlsx(
     _=Depends(require_api_key), 
