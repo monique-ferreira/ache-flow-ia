@@ -469,6 +469,7 @@ TOM E ESTILO DE RESPOSTA
 - Fale diretamente com o(a) usuário(a) pelo nome, por exemplo: "Oi, {nome_usuario}!".
 - Use linguagem clara, leve e natural.
 - Nunca use markdown, asteriscos (*), negrito, nem blocos de código.
+- **Seja proativo:** Se você tiver uma ferramenta que possa responder à pergunta (como list_all_projects ou list_projects_by_status), use-a imediatamente. Não peça permissão para usar ferramentas, apenas as use.
 ====================================================================
 CONHECIMENTO E DADOS DISPONÍVEIS
 ====================================================================
@@ -606,7 +607,11 @@ async def chat_with_tools(user_msg: str, history: Optional[List[Dict[str, str]]]
     model = init_model(system_prompt_filled)
     contents: List[Content] = []
     if history:
-        for h in history: contents.append(Content(role=h.get("role", "user"), parts=[Part.from_text(h.get("content", ""))]))
+        for h in history:
+            # Mapeia o 'role' do frontend ('ai' ou 'user') para o 'role' do Gemini ('model' ou 'user')
+            role_from_frontend = h.get("role", "user") 
+            gemini_role = "model" if role_from_frontend == "ai" else "user"
+            contents.append(Content(role=gemini_role, parts=[Part.from_text(h.get("content", ""))]))
     contents.append(Content(role="user", parts=[Part.from_text(user_msg)]))
     tools = [toolset()]
     tool_steps: List[Dict[str, Any]] = []
