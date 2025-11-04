@@ -27,7 +27,7 @@ from vertexai.generative_models import (
 
 # Mongo
 from pymongo import MongoClient, ReturnDocument
-from bson import ObjectId
+from bson import ObjectId, DBRef
 
 # XLSX
 from openpyxl import load_workbook
@@ -171,6 +171,10 @@ def sanitize_doc(data: Any) -> Any:
     # Se for um ObjectId, converte para string
     if isinstance(data, ObjectId):
         return str(data)
+    
+    # Se for um DBRef, converte para string (apenas o ID)
+    if isinstance(data, DBRef):
+        return str(data.id)
     
     # --- NOVO: Se for um dicionário (dict), chama a função recursivamente para cada valor ---
     if isinstance(data, dict):
