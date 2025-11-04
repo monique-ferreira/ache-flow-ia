@@ -420,7 +420,12 @@ async def list_funcionarios(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
     except Exception: return []
 async def resolve_responsavel_id(client: httpx.AsyncClient, nome_ou_email: Optional[str]) -> Optional[str]:
     nome_ou_email = (nome_ou_email or "").strip()
-    if not nome_ou_email: return _token_cache.get("user_id")
+    # --- ALTERAÇÃO IMPORTANTE ---
+    # Se o nome for "eu", "eu mesmo", "para mim", etc., usa o ID do cache (usuário logado)
+    if not nome_ou_email or nome_ou_email.lower() in ["eu", "eu mesmo", "me", "para mim", "eu sou responsável", "sou eu"]: 
+        return _token_cache.get("user_id")
+    # --- FIM DA ALTERAÇÃO ---
+    
     pessoas = await list_funcionarios(client)
     key = nome_ou_email.lower()
     if len(key) == 24 and all(c in '0123456789abcdef' for c in key):
@@ -430,6 +435,8 @@ async def resolve_responsavel_id(client: httpx.AsyncClient, nome_ou_email: Optio
     for p in pessoas:
         full = f"{str(p.get('nome') or '').lower()} {str(p.get('sobrenome') or '').lower()}".strip()
         if full == key or str(p.get('nome') or '').lower() == key: return p.get("_id")
+    
+    # Fallback: Se não achou NINGUÉM, retorna o ID do usuário logado
     return _token_cache.get("user_id")
 def duration_to_date(duracao: Optional[str]) -> str:
     base = datetime.utcnow().date()
@@ -548,6 +555,7 @@ ESCOPO DE CONHECIMENTO (FOCO DUPLO)
 1.  **FOCO PRINCIPAL (GERENCIAMENTO):** Sua prioridade MÁXIMA é responder sobre o Ache Flow. Se a pergunta for sobre 'projetos', 'tarefas', 'prazos', 'funcionários', 'criar', 'listar', ou 'atualizar', você DEVE usar as ferramentas.
 2.  **FOCO SECUNDÁRIO (GERAL):** Se, e SOMENTE SE, a pergunta for CLARAMENTE sobre conhecimentos gerais (ex: 'me conte uma história', 'qual a receita de bolo de chocolate?', 'quem descobriu o brasil?'), e não puder ser respondida por nenhuma ferramenta, você pode usar seu conhecimento interno para responder.
 3.  **REGRA DE PREFERÊNCIA:** Sempre dê preferência a usar uma ferramenta. Só responda com conhecimento geral se nenhuma ferramenta puder ajudar.
+4.  **REGRA DE AMBIGUIDADE:** Se uma pergunta for ambígua (ex: "o que é um diferencial?", que pode ser sobre sua função OU sobre matemática), primeiro tente responder com seu conhecimento geral. Se a pergunta for *específica* sobre você (ex: "qual o *seu* diferencial?" ou "o que *você* faz?"), responda sobre sua missão.
 ====================================================================
 REGRAS DE IMPORTAÇÃO (IMPORTANTE)
 ====================================================================
@@ -561,7 +569,7 @@ REGRAS DE IMPORTAÇÃO (IMPORTANTE)
     - Usuário: "cria um projeto pra mim com este arquivo: https://sharepoint.com/arquivo.xlsx"
     - Você: "Claro! Para criar este projeto, eu só preciso de mais alguns detalhes: Qual será o nome do projeto? Qual a situação dele (ex: Em andamento)? Qual o prazo final (no formato DD-MM-AAAA)? E quem será o responsável (email ou ID)?"
     - Usuário: "O nome é 'Projeto Teste', situação 'Em planejamento', prazo '31-12-2025' e eu serei o responsável."
-    - (Neste caso, você usará o {id_usuario} ou {email_usuario} como responsável e converterá a data para 2025-12-31 antes de chamar a ferramenta `import_project_from_url`)
+    - (Neste caso, você usará "eu" como 'projeto_responsavel' e converterá a data para 2025-12-31 antes de chamar a ferramenta `import_project_from_url`)
 ====================================================================
 TOM E ESTILO DE RESPOSTA
 ====================================================================
@@ -599,7 +607,7 @@ CONTEXTO DO USUÁRIO
 - O usuário logado é: {nome_usuario}
 - O email dele(a) é: {email_usuario}
 - O ID dele(a) é: {id_usuario}
-- Se o usuário disser "eu serei o responsável", "me atribua", "para mim", etc., use o ID '{id_usuario}' como 'responsavel_id' nas ferramentas.
+- Se o usuário disser "eu serei o responsável", "me atribua", "para mim", "sou eu", "eu mesmo", etc., use a palavra "eu" como valor para o campo 'responsavel' nas ferramentas.
 - NUNCA peça o ID do usuário. Se precisar de outro responsável, peça o nome ou email.
 """
 
@@ -655,7 +663,7 @@ def upcoming_deadlines(days: int = 14, top_k: int = 50) -> List[Dict[str, Any]]:
 def count_all_projects() -> int:
     """Conta o número total de projetos no banco."""
     try:
-        return mongo()[COLL_PROJETOS].count_documents({})
+        return len(list(mongo()[COLL_PROJETOS].find({}, {"_id": 1})))
     except Exception as e:
         print(f"Erro ao contar projetos: {e}")
         return -1
@@ -669,7 +677,7 @@ def count_projects_by_status(status: str) -> int:
         rx = {"$regex": re.escape(status_norm), "$options": "i"}
         
     try:
-        return mongo()[COLL_PROJETOS].count_documents({"situacao": rx})
+        return len(list(mongo()[COLL_PROJETOS].find({"situacao": rx}, {"_id": 1})))
     except Exception as e:
         print(f"Erro ao contar projetos por status: {e}")
         return -1
@@ -683,7 +691,7 @@ async def update_project(pid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
         url = f"{TASKS_API_BASE}/projetos/{pid}" 
         resp = await client.put(url, json=payload, headers=auth_headers)
         resp.raise_for_status(); return resp.json()
-# Substitua a função original 'create_project' por esta:
+
 async def create_project(doc: Dict[str, Any]) -> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
         data = pick(doc, ["nome", "situacao", "prazo", "descricao", "categoria"])
@@ -697,9 +705,15 @@ async def create_project(doc: Dict[str, Any]) -> Dict[str, Any]:
     
 async def create_task(doc: Dict[str, Any]) -> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
-        data = pick(doc, ["nome", "projeto_id", "responsavel_id", "descricao", "prioridade", "status", "data_inicio", "data_fim", "documento_referencia", "concluido"])
+        data = pick(doc, ["nome", "projeto_id", "descricao", "prioridade", "status", "data_inicio", "data_fim", "documento_referencia", "concluido"])
         if not data.get("nome"): raise ValueError("nome é obrigatório")
+
+        responsavel_str = doc.get("responsavel") 
+        resolved_id = await resolve_responsavel_id(client, responsavel_str)
+        data["responsavel_id"] = resolved_id
+        
         return await create_task_api(client, data)
+    
 async def update_task(tid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
         auth_headers = await get_api_auth_headers(client, use_json=True)
@@ -737,7 +751,7 @@ def toolset() -> Tool:
         FunctionDeclaration(name="list_projects_by_status", description="Lista projetos por status (ex: 'em andamento').", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
         FunctionDeclaration(name="update_project", description="Atualiza campos de um projeto.", parameters={"type": "object", "properties": {"project_id": {"type": "string"}, "patch": {"type": "object", "properties": {"nome": {"type": "string"}, "situacao": {"type": "string"}, "prazo": {"type": "string"}}}}, "required": ["project_id", "patch"]}),
         FunctionDeclaration(name="create_project", description="Cria um novo projeto.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "responsavel": {"type": "string"}, "situacao": {"type": "string"}, "prazo": {"type": "string"}}, "required": ["nome", "responsavel", "situacao", "prazo"]}),
-        FunctionDeclaration(name="create_task", description="Cria uma nova tarefa.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "projeto_id": {"type": "string"}, "responsavel_id": {"type": "string"}, "data_fim": {"type": "string"}, "data_inicio": {"type": "string"}, "status": {"type": "string"}}, "required": ["nome", "projeto_id", "responsavel_id", "data_fim", "data_inicio", "status"]}),
+        FunctionDeclaration(name="create_task", description="Cria uma nova tarefa.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "projeto_id": {"type": "string"}, "responsavel": {"type": "string"}, "data_fim": {"type": "string"}, "data_inicio": {"type": "string"}, "status": {"type": "string"}}, "required": ["nome", "projeto_id", "responsavel", "data_fim", "data_inicio", "status"]}),
         FunctionDeclaration(name="update_task", description="Atualiza campos de uma tarefa.", parameters={"type": "object", "properties": {"task_id": {"type": "string"}, "patch": {"type": "object", "properties": {"nome": {"type": "string"}, "status": {"type": "string"}, "data_fim": {"type": "string"}, "responsavel_id": {"type": "string"}}}}, "required": ["task_id", "patch"]}),
         FunctionDeclaration(name="import_project_from_url", description="Cria um projeto e importa tarefas a partir de uma URL de arquivo .xlsx.", parameters={"type": "object", "properties": {"xlsx_url": {"type": "string"}, "projeto_nome": {"type": "string"}, "projeto_situacao": {"type": "string"}, "projeto_prazo": {"type": "string"}, "projeto_responsavel": {"type": "string"}, "projeto_descricao": {"type": "string"}, "projeto_categoria": {"type": "string"}}, "required": ["xlsx_url", "projeto_nome", "projeto_situacao", "projeto_prazo", "projeto_responsavel"]}),
     ]
