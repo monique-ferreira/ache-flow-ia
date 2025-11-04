@@ -152,8 +152,8 @@ def sanitize_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
     for k, v in doc.items():
         if isinstance(v, ObjectId):
             out[k] = str(v)
-        elif isinstance(v, (datetime, datetime.date)): # <--- ESTA É A CORREÇÃO
-            out[k] = v.isoformat() # Converte datas para string no formato ISO (AAAA-MM-DD)
+        elif isinstance(v, (datetime, datetime.date)): # <--- Esta linha é a correção
+            out[k] = v.isoformat() # Converte datas para string
         else:
             out[k] = v
     return out
@@ -623,7 +623,7 @@ def _normalize_answer(raw: str, nome_usuario: str) -> str:
 def init_model(system_instruction: str) -> GenerativeModel:
     vertex_init(project=PROJECT_ID, location=LOCATION) 
     return GenerativeModel(GEMINI_MODEL_ID, system_instruction=system_instruction)
-async def chat_with_tools(user_msg: str, history: Optional[List[Dict[str, str]]] = None, nome_usuario: Optional[str] = None, email_usuario: Optional[str] = None, id_usuario: Optional[str] = None) -> Dict[str, Any]:
+async def chat_with_tools(user_msg: str, history: Optional[List[HistoryMessage]] = None, nome_usuario: Optional[str] = None, email_usuario: Optional[str] = None, id_usuario: Optional[str] = None) -> Dict[str, Any]:
     # --- BUG CORRIGIDO AQUI ---
     data_hoje, (inicio_mes, fim_mes) = iso_date(today()), month_bounds(today())
     nome_usuario = nome_usuario or "você"
@@ -693,7 +693,7 @@ async def chat_with_tools(user_msg: str, history: Optional[List[Dict[str, str]]]
 class MessageContent(BaseModel):
     tipo_resposta: str
     conteudo_texto: str
-    dados: Optional[Dict[str, Any]] = None
+    dados: Optional[List[Any]] = None
 
 class HistoryMessage(BaseModel):
     sender: str # 'user', 'ai', ou 'system'
