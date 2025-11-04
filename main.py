@@ -12,10 +12,15 @@ from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, Depe
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-# Vertex
+# Vertex AI (Imports corretos que estavam faltando)
 from vertexai import init as vertex_init
-from vertexai.generative_models import ( GenerativeModel, Tool, FunctionDeclaration, Part, Content )
-from vertexai.preview.language_models import TextEmbeddingModel
+from vertexai.generative_models import (
+    GenerativeModel,
+    Tool,
+    FunctionDeclaration,
+    Part,
+    Content,
+)
 
 # Mongo
 from pymongo import MongoClient, ReturnDocument
@@ -52,7 +57,6 @@ TASKS_API_TASKS_PATH     = os.getenv("TASKS_API_TASKS_PATH", "/tarefas")
 TASKS_API_TOKEN_PATH     = os.getenv("TASKS_API_TOKEN_PATH", "/token")
 TASKS_API_USERNAME       = os.getenv("TASKS_API_USERNAME")
 TASKS_API_PASSWORD       = os.getenv("TASKS_API_PASSWORD")
-# Token que este serviço usa para falar com a API do Render (se a autenticação /token falhar)
 ACHEFLOW_MAIN_API_TOKEN = os.getenv("ACHEFLOW_API_TOKEN") 
 
 TIMEOUT_S = int(os.getenv("TIMEOUT_S", "90"))
@@ -65,7 +69,7 @@ DEFAULT_TOP_K = 8
 # =========================
 # FastAPI App (Único)
 # =========================
-app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="2.0.0")
+app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="2.0.1")
 
 # =========================
 # Segurança
@@ -95,9 +99,12 @@ async def all_exception_handler(request, exc):
         detail = exc.detail
         status_code = exc.status_code
 
+    # Esconde o traceback em produção
+    trace_info = tb[-4000:] if "localhost" in str(request.url) or os.getenv("ENV_MODE") == "debug" else None
+
     return JSONResponse(
         status_code=status_code,
-        content={"erro": "internal_error", "detail": detail, "trace": tb[-4000:] if "localhost" in str(request.url) else None},
+        content={"erro": "internal_error", "detail": detail, "trace": trace_info},
     )
 
 # =========================
@@ -126,8 +133,7 @@ def mongo():
 
 # =========================
 # Helpers de Download (PDF/XLSX)
-# (Omitidos por brevidade - cole o bloco de funções daqui)
-# ...
+# (Estes estavam faltando no seu main.py)
 # =========================
 def fetch_bytes(url: str) -> bytes:
     if not url: raise ValueError("URL ausente")
@@ -169,6 +175,8 @@ def fetch_pdf_bytes(url: str):
         r = _try_download_traced(cand, TIMEOUT_S, PDF_USER_AGENT); last = r
         if r["status"] == 200 and _is_pdf(r["content_type"], r["content"]): return r["content"]
     raise ValueError(f"Não foi possível obter PDF (último status={last['status'] if last else None}, content-type={last['content_type'] if last else None}).")
+
+# --- FUNÇÕES DE PDF QUE ESTAVAM FALTANDO ---
 def clean_pdf_text(s: str) -> str:
     if not s: return s
     s = re.sub(r"[ \t]*\n[ \t]*", " ", s); s = re.sub(r"\s{2,}", " ", s)
@@ -186,6 +194,8 @@ def extract_after_anchor_from_pdf(pdf_bytes: bytes, anchor_label: str, max_chars
     start = m.end(); next_m = re.search(r"(?i)\bTexto\.?\d+\.?\b", text_all[start:])
     end = start + next_m.start() if next_m else len(text_all)
     return text_all[start:end].strip()[:max_chars].strip()
+# --- FIM DAS FUNÇÕES FALTANTES ---
+
 def xlsx_bytes_to_dataframe_preserving_hyperlinks(xlsx_bytes: bytes) -> pd.DataFrame:
     wb = load_workbook(io.BytesIO(xlsx_bytes), data_only=True, read_only=False); ws = wb.active
     headers: List[str] = [str(cell.value).strip() if cell.value is not None else "" for cell in next(ws.iter_rows(min_row=1, max_row=1, values_only=False))]
@@ -221,24 +231,16 @@ def xlsx_bytes_to_dataframe_preserving_hyperlinks(xlsx_bytes: bytes) -> pd.DataF
 _token_cache: Dict[str, Any] = {"access_token": None, "expires_at": 0, "user_id": None}
 
 async def get_auth_header(client: httpx.AsyncClient) -> Dict[str, str]:
-    # 1. Tenta o token estático (se fornecido)
     if ACHEFLOW_MAIN_API_TOKEN:
         return {"Authorization": f"Bearer {ACHEFLOW_MAIN_API_TOKEN}"}
-    
-    # 2. Tenta o token cacheado (de /token)
     now = time.time()
     if _token_cache.get("access_token") and now < _token_cache.get("expires_at", 0) - 30:
         return {"Authorization": f"Bearer {_token_cache['access_token']}"}
-    
-    # 3. Se não tem usuário/senha, não há como autenticar
     if not TASKS_API_USERNAME or not TASKS_API_PASSWORD:
         raise HTTPException(status_code=401, detail="Nenhum token (ACHEFLOW_MAIN_API_TOKEN) ou credenciais (TASKS_API_USERNAME/PASSWORD) fornecidos para a API Principal.")
-
-    # 4. Busca um novo token
     token_url = urljoin(TASKS_API_BASE + "/", TASKS_API_TOKEN_PATH.lstrip("/"))
     data = {"username": TASKS_API_USERNAME, "password": TASKS_API_PASSWORD}
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
-
     try:
         resp = await client.post(token_url, data=data, headers=headers, timeout=TIMEOUT_S)
         resp.raise_for_status()
@@ -246,8 +248,7 @@ async def get_auth_header(client: httpx.AsyncClient) -> Dict[str, str]:
         access_token = payload.get("access_token")
         expires_in  = int(payload.get("expires_in") or 3600)
         _token_cache["user_id"] = payload.get("id") or _token_cache.get("user_id")
-        if not access_token:
-            raise RuntimeError(f"Resposta de token sem access_token")
+        if not access_token: raise RuntimeError(f"Resposta de token sem access_token")
         _token_cache["access_token"] = access_token
         _token_cache["expires_at"] = time.time() + expires_in
         return {"Authorization": f"Bearer {access_token}"}
@@ -263,14 +264,9 @@ async def get_api_auth_headers(client: httpx.AsyncClient, use_json: bool = True)
 # =========================
 # Lógica de Importação (do ai_api.py)
 # =========================
-
 class CreateTaskItem(BaseModel):
-    titulo: str
-    descricao: Optional[str] = None
-    responsavel: Optional[str] = None
-    deadline: Optional[str] = None
-    doc_ref: Optional[str] = None
-    prazo_data: Optional[str] = None # YYYY-MM-DD
+    titulo: str; descricao: Optional[str] = None; responsavel: Optional[str] = None
+    deadline: Optional[str] = None; doc_ref: Optional[str] = None; prazo_data: Optional[str] = None
 
 async def create_project_api(client: httpx.AsyncClient, data: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{TASKS_API_BASE}{TASKS_API_PROJECTS_PATH}"
@@ -283,11 +279,8 @@ async def create_project_api(client: httpx.AsyncClient, data: Dict[str, Any]) ->
 async def create_task_api(client: httpx.AsyncClient, data: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{TASKS_API_BASE}{TASKS_API_TASKS_PATH}"
     auth_headers = await get_api_auth_headers(client, use_json=True)
-    payload = pick(data, [
-        "nome", "projeto_id", "responsavel_id", "descricao", "prioridade", 
-        "status", "data_inicio", "data_fim", "documento_referencia", "concluido"
-    ])
-    payload = {k: v for k, v in payload.items() if v is not None} # Filtra nulos
+    payload = pick(data, ["nome", "projeto_id", "responsavel_id", "descricao", "prioridade", "status", "data_inicio", "data_fim", "documento_referencia", "concluido"])
+    payload = {k: v for k, v in payload.items() if v is not None}
     r = await client.post(url, json=payload, headers=auth_headers, timeout=TIMEOUT_S)
     r.raise_for_status()
     return r.json()
@@ -335,6 +328,24 @@ def duration_to_date(duracao: Optional[str]) -> str:
     except Exception: n = 7
     return (base + timedelta(days=n)).isoformat()
 
+# --- FUNÇÃO DE RESOLUÇÃO DE PDF QUE ESTAVA FALTANDO ---
+def resolve_descricao_pdf(row) -> str:
+    como, docrf = str(row.get("Como Fazer") or "").strip(), str(row.get("Documento Referência") or "").strip()
+    if not como or not docrf or not re.search(r"(?i)\b((?:Doc\.?\s*)?(Texto\.?\d+))\b\.?", como): return como
+    try: 
+        pdf_bytes = fetch_pdf_bytes(docrf)
+    except Exception: 
+        return como # Retorna 'como' original se o PDF falhar
+    
+    def _repl(m: re.Match) -> str:
+        full_token, anchor = m.group(1), m.group(2)
+        extracted = clean_pdf_text(extract_after_anchor_from_pdf(pdf_bytes, anchor))
+        return extracted if extracted else full_token
+    
+    return re.sub(r"(?i)\b((?:Doc\.?\s*)?(Texto\.?\d+))\b\.?", _repl, como)
+# --- FIM DA FUNÇÃO FALTANTE ---
+
+
 async def tasks_from_xlsx_logic(
     projeto_id: Optional[str],
     projeto_nome: Optional[str],
@@ -361,18 +372,8 @@ async def tasks_from_xlsx_logic(
         missing = required - set(df.columns)
         raise HTTPException(status_code=400, detail={"erro": f"Colunas faltando: {', '.join(missing)}"})
 
-    def resolve_descricao(row) -> str:
-        como, docrf = str(row.get("Como Fazer") or "").strip(), str(row.get("Documento Referência") or "").strip()
-        if not como or not docrf or not re.search(r"(?i)\b((?:Doc\.?\s*)?(Texto\.?\d+))\b\.?", como): return como
-        try: pdf_bytes = fetch_pdf_bytes(docrf)
-        except Exception: return como
-        def _repl(m: re.Match) -> str:
-            full_token, anchor = m.group(1), m.group(2)
-            extracted = clean_pdf_text(extract_after_anchor_from_pdf(pdf_bytes, anchor))
-            return extracted if extracted else full_token
-        return re.sub(r"(?i)\b((?:Doc\.?\s*)?(Texto\.?\d+))\b\.?", _repl, como)
-
-    df["descricao_final"] = df.apply(resolve_descricao, axis=1)
+    # --- CORREÇÃO: Usando a função de PDF ---
+    df["descricao_final"] = df.apply(resolve_descricao_pdf, axis=1)
 
     preview: List[Dict[str, Any]] = []
     latest_task_date: Optional[datetime.date] = None
@@ -416,7 +417,7 @@ async def tasks_from_xlsx_logic(
             if create_project_flag and projeto_nome:
                 proj_resp_id = await resolve_responsavel_id(client, projeto_responsavel)
                 proj_prazo = (projeto_prazo or "").strip()
-                if not proj_prazo: # GOAL 5: Auto-prazo
+                if not proj_prazo:
                     proj_prazo = (latest_task_date or (today_date + timedelta(days=30))).isoformat()
                 
                 proj = await create_project_api(client, {
@@ -448,6 +449,54 @@ async def tasks_from_xlsx_logic(
 # =========================
 # Lógica da IA (do vertex_ai_service.py)
 # =========================
+# Prompt
+SYSTEM_PROMPT = """
+Você é o "Ache" — um assistente de produtividade virtual da plataforma Ache Flow.
+Sua missão é ajudar colaboradores(as) como {nome_usuario} a entender e gerenciar tarefas, projetos e prazos.
+
+====================================================================
+REGRAS DE IMPORTAÇÃO (IMPORTANTE)
+====================================================================
+- O usuário pode enviar arquivos (xlsx, csv) pelo chat usando o botão de clipe.
+- Se o usuário falar "quero importar" ou "enviar um arquivo", instrua-o a usar o botão de clipe.
+- Se o usuário colar uma URL (http/https), sua intenção é importar daquela URL.
+- Para importar (por URL), use a ferramenta `import_project_from_url`.
+- **REGRA CRÍTICA:** Esta ferramenta precisa de 5 argumentos: `xlsx_url`, `projeto_nome`, `projeto_situacao`, `projeto_prazo` (YYYY-MM-DD), e `projeto_responsavel`.
+- Você DEVE perguntar ao usuário por **todas** as informações que estiverem faltando ANTES de chamar a ferramenta.
+- Exemplo de conversa:
+    - Usuário: "cria um projeto pra mim com este arquivo: https://sharepoint.com/arquivo.xlsx"
+    - Você: "Claro! Para criar este projeto, eu só preciso de mais alguns detalhes: Qual será o nome do projeto? Qual a situação dele (ex: Em andamento)? Qual o prazo final (no formato AAAA-MM-DD)? E quem será o responsável (email ou ID)?"
+    - Usuário: "O nome é 'Projeto Teste', situação 'Em planejamento', prazo '2025-12-31' e o responsável é 'ana.silva@email.com'"
+    - (Agora sim você chama a ferramenta `import_project_from_url` com todos os dados)
+
+====================================================================
+TOM E ESTILO DE RESPOSTA
+====================================================================
+- Sempre fale em **português (PT-BR)**.
+- Seja simpático(a), humano(a), colaborativo(a) e positivo(a).
+- Fale diretamente com o(a) usuário(a) pelo nome, por exemplo: "Oi, {nome_usuario}!".
+- Use linguagem clara, leve e natural.
+- Nunca use markdown, asteriscos (*), negrito, nem blocos de código.
+
+====================================================================
+CONHECIMENTO E DADOS DISPONÍVEIS
+====================================================================
+As informações podem ser obtidas através das ferramentas (tools):
+- list_all_projects / list_all_tasks / list_all_funcionarios
+- list_tasks_by_deadline_range
+- list_projects_by_status
+- upcoming_deadlines
+- update_project / update_task (para editar)
+- create_project / create_task (para criar itens individuais)
+- import_project_from_url (para importar arquivos .xlsx por URL)
+
+====================================================================
+INTERPRETAÇÃO DE DATAS (BASE)
+====================================================================
+- Hoje: {data_hoje}.
+- Intervalo de "este mês": {inicio_mes} até {fim_mes}.
+"""
+
 # Funções de leitura direta do Mongo
 def list_all_projects(top_k: int = 500) -> List[Dict[str, Any]]:
     return [sanitize_doc(x) for x in mongo()[COLL_PROJETOS].find({}).sort("prazo", 1).limit(top_k)]
@@ -507,27 +556,16 @@ async def import_project_from_url_tool(
     projeto_descricao: Optional[str] = None,
     projeto_categoria: Optional[str] = None
 ) -> Dict[str, Any]:
-    """
-    Função wrapper para a IA chamar a lógica de importação.
-    Ela chama tasks_from_xlsx_logic diretamente.
-    """
-    # Esta função agora chama a lógica Python local, não mais httpx
     return await tasks_from_xlsx_logic(
-        projeto_id=None, # A IA sempre cria um projeto novo ou acha por nome
-        projeto_nome=projeto_nome,
-        create_project_flag=1, # A IA sempre tem a intenção de criar se não achar
-        projeto_situacao=projeto_situacao,
-        projeto_prazo=projeto_prazo,
-        projeto_responsavel=projeto_responsavel,
-        projeto_descricao=projeto_descricao,
-        projeto_categoria=projeto_categoria,
-        xlsx_url=xlsx_url,
-        file_bytes=None # A IA só importa por URL
+        projeto_id=None, projeto_nome=projeto_nome,
+        create_project_flag=1, projeto_situacao=projeto_situacao,
+        projeto_prazo=projeto_prazo, projeto_responsavel=projeto_responsavel,
+        projeto_descricao=projeto_descricao, projeto_categoria=projeto_categoria,
+        xlsx_url=xlsx_url, file_bytes=None
     )
 
 # Toolset da IA
 def toolset() -> Tool:
-    # (Definições das ferramentas omitidas por brevidade - cole o bloco de toolset daqui)
     fns = [
         FunctionDeclaration(name="list_all_projects", description="Lista todos os projetos.", parameters={"type": "object", "properties": {}}),
         FunctionDeclaration(name="list_all_tasks", description="Lista todas as tarefas.", parameters={"type": "object", "properties": {}}),
@@ -577,8 +615,11 @@ def _normalize_answer(raw: str, nome_usuario: str) -> str:
     if not raw.lower().startswith(("oi", "olá", "ola")): raw = saud + raw
     if all(sym not in raw for sym in ("🙂", "😊", "👋")): raw = raw.rstrip(".") + " 🙂"
     return raw
+
+# --- CORREÇÃO: A importação do vertexai foi movida para o topo ---
+# A função init_model agora usa a importação global
 def init_model(system_instruction: str) -> GenerativeModel:
-    vertex_init(project=PROJECT_ID, location=LOCATION)
+    vertex_init(project=PROJECT_ID, location=LOCATION) # Inicializa "lazy"
     return GenerativeModel(GEMINI_MODEL_ID, system_instruction=system_instruction)
 
 async def chat_with_tools(user_msg: str, history: Optional[List[Dict[str, str]]] = None, nome_usuario: Optional[str] = None) -> Dict[str, Any]:
@@ -620,7 +661,6 @@ async def chat_with_tools(user_msg: str, history: Optional[List[Dict[str, str]]]
             if name in ("list_projects_by_deadline_range", "list_tasks_by_deadline_range") and (not args.get("start") or not args.get("end")):
                 args["start"], args["end"] = inicio_mes, fim_mes
 
-            # Executa a ferramenta (agora assíncrono)
             result = await exec_tool(name, args)
             tool_steps.append({"call": {"name": name, "args": args}, "result": result})
             contents.append(Content(role="tool", parts=[Part.from_function_response(name=name, response=result)]))
@@ -651,23 +691,17 @@ async def ai_chat(req: ChatRequest, _=Depends(require_api_key)):
 @app.post("/tasks/from-xlsx")
 async def tasks_from_xlsx(
     _=Depends(require_api_key), # Protege a rota
-    # Projeto
     projeto_id: Optional[str] = Form(None),
     projeto_nome: Optional[str] = Form(None),
-    # Dados para criação
     create_project_flag: int = Form(0),
     projeto_situacao: Optional[str] = Form(None),
     projeto_prazo: Optional[str] = Form(None),
     projeto_responsavel: Optional[str] = Form(None),
     projeto_descricao: Optional[str] = Form(None),
     projeto_categoria: Optional[str] = Form(None),
-    # Fonte
     xlsx_url: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None)
 ):
-    """
-    Rota pública para importar. Usada pelo Modal e pelo Chat (via upload).
-    """
     file_bytes = await file.read() if file else None
     
     result = await tasks_from_xlsx_logic(
