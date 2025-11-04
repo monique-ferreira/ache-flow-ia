@@ -10,9 +10,12 @@ import pandas as pd
 import pdfplumber
 from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, Depends
 from fastapi.responses import JSONResponse
+# --- ADICIONADO IMPORT FALTANTE ---
+from fastapi.middleware.cors import CORSMiddleware
+# --- FIM DA ADIÇÃO ---
 from pydantic import BaseModel, Field
 
-# Vertex AI (Imports corretos que estavam faltando)
+# Vertex AI (Imports corretos)
 from vertexai import init as vertex_init
 from vertexai.generative_models import (
     GenerativeModel,
@@ -41,16 +44,12 @@ LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
 APPLICATION_NAME = os.getenv("GOOGLE_CLOUD_APLICATION", "ai-service")
 GEMINI_MODEL_ID = os.getenv("GEMINI_MODEL_ID", "gemini-2.0-flash")
 
-# Chave para PROTEGER este serviço
 API_KEY = os.getenv("API_KEY") 
-
-# Conexão Mongo (para leitura da IA)
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/acheflow")
 COLL_PROJETOS = os.getenv("MONGO_COLL_PROJETOS", "projetos")
 COLL_TAREFAS = os.getenv("MONGO_COLL_TAREFAS", "tarefas")
 COLL_FUNCIONARIOS = os.getenv("MONGO_COLL_FUNCIONARIOS", "funcionarios")
 
-# API Principal (Render)
 TASKS_API_BASE           = os.getenv("TASKS_API_BASE", "https://ache-flow-back.onrender.com").rstrip("/")
 TASKS_API_PROJECTS_PATH  = os.getenv("TASKS_API_PROJECTS_PATH", "/projetos")
 TASKS_API_TASKS_PATH     = os.getenv("TASKS_API_TASKS_PATH", "/tarefas")
@@ -69,14 +68,15 @@ DEFAULT_TOP_K = 8
 # =========================
 # FastAPI App (Único)
 # =========================
-app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="2.0.1")
+app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="2.0.3") # Versão
 
-
+# === ADICIONADO BLOCO CORS ===
 # Lista de domínios que podem acessar sua API
-# Adicione a URL do seu site quando ele estiver no ar
 origins = [
     "http://localhost:5173", # Para desenvolvimento local
-    "https://ache-flow.vercel.app"
+    "http://localhost:5174", # Outra porta local comum
+    "https://acheflow.web.app", # Exemplo de site no ar
+    "https://acheflow.firebaseapp.com" # Exemplo de site no ar
 ]
 
 app.add_middleware(
@@ -86,6 +86,7 @@ app.add_middleware(
     allow_methods=["*"],         # Permite todos os métodos (GET, POST, etc.)
     allow_headers=["*"],         # Permite todos os cabeçalhos (x-api-key, etc.)
 )
+# ===============================
 
 # =========================
 # Segurança
@@ -115,9 +116,7 @@ async def all_exception_handler(request, exc):
         detail = exc.detail
         status_code = exc.status_code
 
-    # Esconde o traceback em produção
     trace_info = tb[-4000:] if "localhost" in str(request.url) or os.getenv("ENV_MODE") == "debug" else None
-
     return JSONResponse(
         status_code=status_code,
         content={"erro": "internal_error", "detail": detail, "trace": trace_info},
@@ -128,9 +127,21 @@ async def all_exception_handler(request, exc):
 # =========================
 def today() -> datetime: return datetime.utcnow()
 def iso_date(d: datetime) -> str: return d.date().isoformat()
+
+# --- FUNÇÃO QUE ESTAVA FALTANDO ---
+def month_bounds(d: datetime) -> Tuple[str, str]:
+    first = d.replace(day=1).date().isoformat()
+    if d.month == 12:
+        nxt = d.replace(year=d.year + 1, month=1, day=1)
+    else:
+        nxt = d.replace(month=d.month + 1, day=1)
+    last = (nxt - timedelta(days=1)).date().isoformat()
+    return first, last
+# --- FIM DA ADIÇÃO ---
+
 def to_oid(id_str: str) -> ObjectId:
     try: return ObjectId(id_str)
-    except Exception: return id_str  # type: ignore
+    except Exception: return id_str
 def pick(d: Dict[str, Any], keys: List[str]) -> Dict[str, Any]:
     return {k: d.get(k) for k in keys if k in d}
 def sanitize_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
@@ -149,7 +160,7 @@ def mongo():
 
 # =========================
 # Helpers de Download (PDF/XLSX)
-# (Estes estavam faltando no seu main.py)
+# (Omitidos por brevidade)
 # =========================
 def fetch_bytes(url: str) -> bytes:
     if not url: raise ValueError("URL ausente")
@@ -191,8 +202,6 @@ def fetch_pdf_bytes(url: str):
         r = _try_download_traced(cand, TIMEOUT_S, PDF_USER_AGENT); last = r
         if r["status"] == 200 and _is_pdf(r["content_type"], r["content"]): return r["content"]
     raise ValueError(f"Não foi possível obter PDF (último status={last['status'] if last else None}, content-type={last['content_type'] if last else None}).")
-
-# --- FUNÇÕES DE PDF QUE ESTAVAM FALTANDO ---
 def clean_pdf_text(s: str) -> str:
     if not s: return s
     s = re.sub(r"[ \t]*\n[ \t]*", " ", s); s = re.sub(r"\s{2,}", " ", s)
@@ -210,8 +219,6 @@ def extract_after_anchor_from_pdf(pdf_bytes: bytes, anchor_label: str, max_chars
     start = m.end(); next_m = re.search(r"(?i)\bTexto\.?\d+\.?\b", text_all[start:])
     end = start + next_m.start() if next_m else len(text_all)
     return text_all[start:end].strip()[:max_chars].strip()
-# --- FIM DAS FUNÇÕES FALTANTES ---
-
 def xlsx_bytes_to_dataframe_preserving_hyperlinks(xlsx_bytes: bytes) -> pd.DataFrame:
     wb = load_workbook(io.BytesIO(xlsx_bytes), data_only=True, read_only=False); ws = wb.active
     headers: List[str] = [str(cell.value).strip() if cell.value is not None else "" for cell in next(ws.iter_rows(min_row=1, max_row=1, values_only=False))]
@@ -243,9 +250,9 @@ def xlsx_bytes_to_dataframe_preserving_hyperlinks(xlsx_bytes: bytes) -> pd.DataF
 
 # =========================
 # Auth (Falar com API Render)
+# (Omitido por brevidade)
 # =========================
 _token_cache: Dict[str, Any] = {"access_token": None, "expires_at": 0, "user_id": None}
-
 async def get_auth_header(client: httpx.AsyncClient) -> Dict[str, str]:
     if ACHEFLOW_MAIN_API_TOKEN:
         return {"Authorization": f"Bearer {ACHEFLOW_MAIN_API_TOKEN}"}
@@ -270,7 +277,6 @@ async def get_auth_header(client: httpx.AsyncClient) -> Dict[str, str]:
         return {"Authorization": f"Bearer {access_token}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Falha ao autenticar com a API Principal em {token_url}: {str(e)}")
-
 async def get_api_auth_headers(client: httpx.AsyncClient, use_json: bool = True) -> Dict[str, str]:
     auth_header = await get_auth_header(client)
     if use_json:
@@ -279,11 +285,11 @@ async def get_api_auth_headers(client: httpx.AsyncClient, use_json: bool = True)
 
 # =========================
 # Lógica de Importação (do ai_api.py)
+# (Omitido por brevidade)
 # =========================
 class CreateTaskItem(BaseModel):
     titulo: str; descricao: Optional[str] = None; responsavel: Optional[str] = None
     deadline: Optional[str] = None; doc_ref: Optional[str] = None; prazo_data: Optional[str] = None
-
 async def create_project_api(client: httpx.AsyncClient, data: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{TASKS_API_BASE}{TASKS_API_PROJECTS_PATH}"
     auth_headers = await get_api_auth_headers(client, use_json=True)
@@ -291,7 +297,6 @@ async def create_project_api(client: httpx.AsyncClient, data: Dict[str, Any]) ->
     r = await client.post(url, json=payload, headers=auth_headers, timeout=TIMEOUT_S)
     r.raise_for_status()
     return r.json()
-
 async def create_task_api(client: httpx.AsyncClient, data: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{TASKS_API_BASE}{TASKS_API_TASKS_PATH}"
     auth_headers = await get_api_auth_headers(client, use_json=True)
@@ -300,7 +305,6 @@ async def create_task_api(client: httpx.AsyncClient, data: Dict[str, Any]) -> Di
     r = await client.post(url, json=payload, headers=auth_headers, timeout=TIMEOUT_S)
     r.raise_for_status()
     return r.json()
-
 async def find_project_id_by_name(client: httpx.AsyncClient, projeto_nome: str) -> Optional[str]:
     url = f"{TASKS_API_BASE}{TASKS_API_PROJECTS_PATH}"
     auth_headers = await get_api_auth_headers(client, use_json=True)
@@ -313,7 +317,6 @@ async def find_project_id_by_name(client: httpx.AsyncClient, projeto_nome: str) 
             return (hit or {}).get("_id") if hit else None
     except Exception: return None
     return None
-
 async def list_funcionarios(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
     url = f"{TASKS_API_BASE}/funcionarios"
     auth_headers = await get_api_auth_headers(client, use_json=True)
@@ -321,7 +324,6 @@ async def list_funcionarios(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
     if r.status_code != 200: return []
     try: return r.json() if isinstance(r.json(), list) else []
     except Exception: return []
-
 async def resolve_responsavel_id(client: httpx.AsyncClient, nome_ou_email: Optional[str]) -> Optional[str]:
     nome_ou_email = (nome_ou_email or "").strip()
     if not nome_ou_email: return _token_cache.get("user_id")
@@ -335,7 +337,6 @@ async def resolve_responsavel_id(client: httpx.AsyncClient, nome_ou_email: Optio
         full = f"{str(p.get('nome') or '').lower()} {str(p.get('sobrenome') or '').lower()}".strip()
         if full == key or str(p.get('nome') or '').lower() == key: return p.get("_id")
     return _token_cache.get("user_id")
-
 def duration_to_date(duracao: Optional[str]) -> str:
     base = datetime.utcnow().date()
     try:
@@ -343,25 +344,18 @@ def duration_to_date(duracao: Optional[str]) -> str:
         n = int(m.group(1)) if m else 7
     except Exception: n = 7
     return (base + timedelta(days=n)).isoformat()
-
-# --- FUNÇÃO DE RESOLUÇÃO DE PDF QUE ESTAVA FALTANDO ---
 def resolve_descricao_pdf(row) -> str:
     como, docrf = str(row.get("Como Fazer") or "").strip(), str(row.get("Documento Referência") or "").strip()
     if not como or not docrf or not re.search(r"(?i)\b((?:Doc\.?\s*)?(Texto\.?\d+))\b\.?", como): return como
     try: 
         pdf_bytes = fetch_pdf_bytes(docrf)
     except Exception: 
-        return como # Retorna 'como' original se o PDF falhar
-    
+        return como
     def _repl(m: re.Match) -> str:
         full_token, anchor = m.group(1), m.group(2)
         extracted = clean_pdf_text(extract_after_anchor_from_pdf(pdf_bytes, anchor))
         return extracted if extracted else full_token
-    
     return re.sub(r"(?i)\b((?:Doc\.?\s*)?(Texto\.?\d+))\b\.?", _repl, como)
-# --- FIM DA FUNÇÃO FALTANTE ---
-
-
 async def tasks_from_xlsx_logic(
     projeto_id: Optional[str],
     projeto_nome: Optional[str],
@@ -374,7 +368,6 @@ async def tasks_from_xlsx_logic(
     xlsx_url: Optional[str],
     file_bytes: Optional[bytes]
 ) -> Dict[str, Any]:
-    
     if xlsx_url:
         xbytes = fetch_bytes(xlsx_url)
         df = xlsx_bytes_to_dataframe_preserving_hyperlinks(xbytes)
@@ -382,19 +375,14 @@ async def tasks_from_xlsx_logic(
         df = xlsx_bytes_to_dataframe_preserving_hyperlinks(file_bytes)
     else:
         raise HTTPException(status_code=400, detail={"erro": "Forneça 'xlsx_url' ou envie um 'file'."})
-
     required = {"Nome", "Como Fazer", "Documento Referência"}
     if not required.issubset(df.columns):
         missing = required - set(df.columns)
         raise HTTPException(status_code=400, detail={"erro": f"Colunas faltando: {', '.join(missing)}"})
-
-    # --- CORREÇÃO: Usando a função de PDF ---
     df["descricao_final"] = df.apply(resolve_descricao_pdf, axis=1)
-
     preview: List[Dict[str, Any]] = []
     latest_task_date: Optional[datetime.date] = None
     today_date = datetime.utcnow().date()
-
     for _, row in df.iterrows():
         prazo_col = str(row.get("Prazo") or "").strip()
         task_date_obj: Optional[datetime.date] = None
@@ -403,7 +391,6 @@ async def tasks_from_xlsx_logic(
                 if re.match(r"^\d{2}/\d{2}/\d{4}$", prazo_col): d, m, y = prazo_col.split("/"); prazo_col = f"{y}-{m}-{d}"
                 task_date_obj = datetime.strptime(prazo_col, "%Y-%m-%d").date()
             except Exception: prazo_col = None
-        
         if not task_date_obj:
             duracao_txt = str(row.get("Duração") or "")
             try:
@@ -411,31 +398,25 @@ async def tasks_from_xlsx_logic(
                 n = int(m.group(1)) if m else 7; task_date_obj = today_date + timedelta(days=n)
             except Exception: task_date_obj = today_date + timedelta(days=7)
             prazo_col = task_date_obj.isoformat()
-        
         if latest_task_date is None or task_date_obj > latest_task_date:
             latest_task_date = task_date_obj
-            
         preview.append({
             "titulo": str(row["Nome"]), "descricao": str(row.get("descricao_final") or ""),
             "responsavel": str(row.get("Responsavel") or ""), "doc_ref": str(row.get("Documento Referência") or "").strip(),
             "prazo": prazo_col,
         })
-            
     if not projeto_id and not projeto_nome:
         raise HTTPException(status_code=400, detail={"erro": "Para importar, forneça 'projeto_id' ou 'projeto_nome'."})
-
     async with httpx.AsyncClient() as client:
         resolved_project_id: Optional[str] = projeto_id
         if not resolved_project_id and projeto_nome:
             resolved_project_id = await find_project_id_by_name(client, projeto_nome)
-
         if not resolved_project_id:
             if create_project_flag and projeto_nome:
                 proj_resp_id = await resolve_responsavel_id(client, projeto_responsavel)
                 proj_prazo = (projeto_prazo or "").strip()
                 if not proj_prazo:
                     proj_prazo = (latest_task_date or (today_date + timedelta(days=30))).isoformat()
-                
                 proj = await create_project_api(client, {
                     "nome": projeto_nome, "responsavel_id": proj_resp_id,
                     "situacao": (projeto_situacao or "Em planejamento").strip(),
@@ -444,7 +425,6 @@ async def tasks_from_xlsx_logic(
                 resolved_project_id = proj.get("_id") or proj.get("id")
             else:
                 raise HTTPException(status_code=404, detail={"erro": f"Projeto '{projeto_nome}' não encontrado. Para criar, envie 'create_project_flag=1'."})
-
         created, errors = [], []
         for item in preview:
             resp_id = await resolve_responsavel_id(client, item.get("responsavel"))
@@ -458,18 +438,15 @@ async def tasks_from_xlsx_logic(
                 }))
             except Exception as e:
                 errors.append({"erro": str(e), "titulo": item["titulo"]})
-
     return {"mode": "assigned", "projeto_id": resolved_project_id, "criados": created, "total": len(created), "erros": errors}
-
 
 # =========================
 # Lógica da IA (do vertex_ai_service.py)
+# (Omitido por brevidade)
 # =========================
-# Prompt
 SYSTEM_PROMPT = """
 Você é o "Ache" — um assistente de produtividade virtual da plataforma Ache Flow.
 Sua missão é ajudar colaboradores(as) como {nome_usuario} a entender e gerenciar tarefas, projetos e prazos.
-
 ====================================================================
 REGRAS DE IMPORTAÇÃO (IMPORTANTE)
 ====================================================================
@@ -484,7 +461,6 @@ REGRAS DE IMPORTAÇÃO (IMPORTANTE)
     - Você: "Claro! Para criar este projeto, eu só preciso de mais alguns detalhes: Qual será o nome do projeto? Qual a situação dele (ex: Em andamento)? Qual o prazo final (no formato AAAA-MM-DD)? E quem será o responsável (email ou ID)?"
     - Usuário: "O nome é 'Projeto Teste', situação 'Em planejamento', prazo '2025-12-31' e o responsável é 'ana.silva@email.com'"
     - (Agora sim você chama a ferramenta `import_project_from_url` com todos os dados)
-
 ====================================================================
 TOM E ESTILO DE RESPOSTA
 ====================================================================
@@ -493,7 +469,6 @@ TOM E ESTILO DE RESPOSTA
 - Fale diretamente com o(a) usuário(a) pelo nome, por exemplo: "Oi, {nome_usuario}!".
 - Use linguagem clara, leve e natural.
 - Nunca use markdown, asteriscos (*), negrito, nem blocos de código.
-
 ====================================================================
 CONHECIMENTO E DADOS DISPONÍVEIS
 ====================================================================
@@ -505,15 +480,12 @@ As informações podem ser obtidas através das ferramentas (tools):
 - update_project / update_task (para editar)
 - create_project / create_task (para criar itens individuais)
 - import_project_from_url (para importar arquivos .xlsx por URL)
-
 ====================================================================
 INTERPRETAÇÃO DE DATAS (BASE)
 ====================================================================
 - Hoje: {data_hoje}.
 - Intervalo de "este mês": {inicio_mes} até {fim_mes}.
 """
-
-# Funções de leitura direta do Mongo
 def list_all_projects(top_k: int = 500) -> List[Dict[str, Any]]:
     return [sanitize_doc(x) for x in mongo()[COLL_PROJETOS].find({}).sort("prazo", 1).limit(top_k)]
 def list_all_tasks(top_k: int = 2000) -> List[Dict[str, Any]]:
@@ -529,8 +501,6 @@ def list_projects_by_status(status: str, top_k: int = 50) -> List[Dict[str, Any]
 def upcoming_deadlines(days: int = 14, top_k: int = 50) -> List[Dict[str, Any]]:
     today_iso = iso_date(today()); limit_date = (today() + timedelta(days=days)).date().isoformat()
     return [sanitize_doc(x) for x in mongo()[COLL_TAREFAS].find({"prazo": {"$gte": today_iso, "$lte": limit_date}}).sort("prazo", 1).limit(top_k)]
-
-# Funções de escrita (chamadas via API)
 async def update_project(pid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
         auth_headers = await get_api_auth_headers(client, use_json=True)
@@ -540,19 +510,16 @@ async def update_project(pid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
         url = f"{TASKS_API_BASE}/projetos/{pid}" 
         resp = await client.put(url, json=payload, headers=auth_headers)
         resp.raise_for_status(); return resp.json()
-
 async def create_project(doc: Dict[str, Any]) -> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
         data = pick(doc, ["nome", "responsavel_id", "situacao", "prazo", "descricao", "categoria"])
         if not data.get("nome"): raise ValueError("nome é obrigatório")
         return await create_project_api(client, data)
-
 async def create_task(doc: Dict[str, Any]) -> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
         data = pick(doc, ["nome", "projeto_id", "responsavel_id", "descricao", "prioridade", "status", "data_inicio", "data_fim", "documento_referencia", "concluido"])
         if not data.get("nome"): raise ValueError("nome é obrigatório")
         return await create_task_api(client, data)
-
 async def update_task(tid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
         auth_headers = await get_api_auth_headers(client, use_json=True)
@@ -562,7 +529,6 @@ async def update_task(tid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
         url = f"{TASKS_API_BASE}/tarefas/{tid}" 
         resp = await client.put(url, json=payload, headers=auth_headers)
         resp.raise_for_status(); return resp.json()
-
 async def import_project_from_url_tool(
     xlsx_url: str, 
     projeto_nome: str, 
@@ -579,8 +545,6 @@ async def import_project_from_url_tool(
         projeto_descricao=projeto_descricao, projeto_categoria=projeto_categoria,
         xlsx_url=xlsx_url, file_bytes=None
     )
-
-# Toolset da IA
 def toolset() -> Tool:
     fns = [
         FunctionDeclaration(name="list_all_projects", description="Lista todos os projetos.", parameters={"type": "object", "properties": {}}),
@@ -596,103 +560,81 @@ def toolset() -> Tool:
         FunctionDeclaration(name="import_project_from_url", description="Cria um projeto e importa tarefas a partir de uma URL de arquivo .xlsx.", parameters={"type": "object", "properties": {"xlsx_url": {"type": "string"}, "projeto_nome": {"type": "string"}, "projeto_situacao": {"type": "string"}, "projeto_prazo": {"type": "string"}, "projeto_responsavel": {"type": "string"}, "projeto_descricao": {"type": "string"}, "projeto_categoria": {"type": "string"}}, "required": ["xlsx_url", "projeto_nome", "projeto_situacao", "projeto_prazo", "projeto_responsavel"]}),
     ]
     return Tool(function_declarations=fns)
-
 async def exec_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     try:
-        # Leitura (síncrono, direto do Mongo)
         if name == "list_all_projects": return {"ok": True, "data": list_all_projects(args.get("top_k", 500))}
         if name == "list_all_tasks": return {"ok": True, "data": list_all_tasks(args.get("top_k", 2000))}
         if name == "list_all_funcionarios": return {"ok": True, "data": list_all_funcionarios(args.get("top_k", 500))}
         if name == "list_tasks_by_deadline_range": return {"ok": True, "data": list_tasks_by_deadline_range(args["start"], args["end"], args.get("top_k", 50))}
         if name == "upcoming_deadlines": return {"ok": True, "data": upcoming_deadlines(args.get("days", 14), args.get("top_k", 50))}
         if name == "list_projects_by_status": return {"ok": True, "data": list_projects_by_status(args["status"], args.get("top_k", 50))}
-        
-        # Escrita (assíncrono, via API Render)
         if name == "update_project": return {"ok": True, "data": await update_project(args["project_id"], args.get("patch", {}))}
         if name == "create_project": return {"ok": True, "data": await create_project(args)}
         if name == "create_task": return {"ok": True, "data": await create_task(args)}
         if name == "update_task": return {"ok": True, "data": await update_task(args["task_id"], args.get("patch", {}))}
-        
-        # Importação (assíncrono, lógica local chamando API Render)
         if name == "import_project_from_url": return {"ok": True, "data": await import_project_from_url_tool(**args)}
-
         return {"ok": False, "error": f"função desconhecida: {name}"}
     except Exception as e:
         detail = str(e)
         if isinstance(e, httpx.HTTPStatusError):
-            try: detail = e.response.json().get("detail", err_json.get("erro", str(e)))
-            except Exception: pass
+            try: 
+                err_json = e.response.json() # --- BUG CORRIGIDO AQUI ---
+                detail = err_json.get("detail", err_json.get("erro", str(e)))
+            except Exception: 
+                detail = e.response.text
         return {"ok": False, "error": detail}
-
-# Lógica principal do Chat
 def _normalize_answer(raw: str, nome_usuario: str) -> str:
     raw = re.sub(r"[*_`#>]+", "", raw).strip()
     saud = f"Oi, {nome_usuario}! "
     if not raw.lower().startswith(("oi", "olá", "ola")): raw = saud + raw
     if all(sym not in raw for sym in ("🙂", "😊", "👋")): raw = raw.rstrip(".") + " 🙂"
     return raw
-
-# --- CORREÇÃO: A importação do vertexai foi movida para o topo ---
-# A função init_model agora usa a importação global
 def init_model(system_instruction: str) -> GenerativeModel:
-    vertex_init(project=PROJECT_ID, location=LOCATION) # Inicializa "lazy"
+    vertex_init(project=PROJECT_ID, location=LOCATION) 
     return GenerativeModel(GEMINI_MODEL_ID, system_instruction=system_instruction)
-
 async def chat_with_tools(user_msg: str, history: Optional[List[Dict[str, str]]] = None, nome_usuario: Optional[str] = None) -> Dict[str, Any]:
+    # --- BUG CORRIGIDO AQUI ---
     data_hoje, (inicio_mes, fim_mes) = iso_date(today()), month_bounds(today())
     nome_usuario = nome_usuario or "você"
-
     system_prompt_filled = SYSTEM_PROMPT.format(
         nome_usuario=nome_usuario, data_hoje=data_hoje,
         inicio_mes=inicio_mes, fim_mes=fim_mes,
     )
     model = init_model(system_prompt_filled)
-    
     contents: List[Content] = []
     if history:
         for h in history: contents.append(Content(role=h.get("role", "user"), parts=[Part.from_text(h.get("content", ""))]))
     contents.append(Content(role="user", parts=[Part.from_text(user_msg)]))
-
     tools = [toolset()]
     tool_steps: List[Dict[str, Any]] = []
-
     for step in range(MAX_TOOL_STEPS):
         resp = model.generate_content(contents, tools=tools)
-        
         calls = []
         if resp.candidates and resp.candidates[0].content and resp.candidates[0].content.parts:
             for part in resp.candidates[0].content.parts:
                 if getattr(part, "function_call", None): calls.append(part.function_call)
-
         if not calls:
             final_text = ""
             if resp.candidates and resp.candidates[0].content and resp.candidates[0].content.parts:
                 final_text = getattr(resp.candidates[0].content.parts[0], "text", "") or ""
             final_text = re.sub(r"(?i)(aguarde( um instante)?|só um momento|apenas um instante)[^\n]*", "", final_text).strip()
             return {"answer": _normalize_answer(final_text, nome_usuario), "tool_steps": tool_steps}
-
         for fc in calls:
             name, args = fc.name, {k: v for k, v in (fc.args or {}).items()}
-            
             if name in ("list_projects_by_deadline_range", "list_tasks_by_deadline_range") and (not args.get("start") or not args.get("end")):
                 args["start"], args["end"] = inicio_mes, fim_mes
-
             result = await exec_tool(name, args)
             tool_steps.append({"call": {"name": name, "args": args}, "result": result})
             contents.append(Content(role="tool", parts=[Part.from_function_response(name=name, response=result)]))
-
     return {"answer": _normalize_answer("Concluí as ações solicitadas.", nome_usuario), "tool_steps": tool_steps}
 
 # =========================
 # Rotas FastAPI
 # =========================
-
-# --- Rota de Chat (do vertex_ai_service.py) ---
 class ChatRequest(BaseModel):
     pergunta: str
     history: Optional[List[Dict[str, str]]] = None
     nome_usuario: Optional[str] = None
-
 @app.post("/ai/chat")
 async def ai_chat(req: ChatRequest, _=Depends(require_api_key)):
     out = await chat_with_tools(req.pergunta, req.history, req.nome_usuario)
@@ -702,11 +644,9 @@ async def ai_chat(req: ChatRequest, _=Depends(require_api_key)):
         "dados": out.get("tool_steps")
     }
     return JSONResponse(response_data)
-
-# --- Rota de Importação (do ai_api.py) ---
 @app.post("/tasks/from-xlsx")
 async def tasks_from_xlsx(
-    _=Depends(require_api_key), # Protege a rota
+    _=Depends(require_api_key), 
     projeto_id: Optional[str] = Form(None),
     projeto_nome: Optional[str] = Form(None),
     create_project_flag: int = Form(0),
@@ -719,22 +659,14 @@ async def tasks_from_xlsx(
     file: Optional[UploadFile] = File(None)
 ):
     file_bytes = await file.read() if file else None
-    
     result = await tasks_from_xlsx_logic(
-        projeto_id=projeto_id,
-        projeto_nome=projeto_nome,
-        create_project_flag=create_project_flag,
-        projeto_situacao=projeto_situacao,
-        projeto_prazo=projeto_prazo,
-        projeto_responsavel=projeto_responsavel,
-        projeto_descricao=projeto_descricao,
-        projeto_categoria=projeto_categoria,
-        xlsx_url=xlsx_url,
-        file_bytes=file_bytes
+        projeto_id=projeto_id, projeto_nome=projeto_nome,
+        create_project_flag=create_project_flag, projeto_situacao=projeto_situacao,
+        projeto_prazo=projeto_prazo, projeto_responsavel=projeto_responsavel,
+        projeto_descricao=projeto_descricao, projeto_categoria=projeto_categoria,
+        xlsx_url=xlsx_url, file_bytes=file_bytes
     )
     return result
-
-# --- Rota Root ---
 @app.get("/")
 def root():
     return {
