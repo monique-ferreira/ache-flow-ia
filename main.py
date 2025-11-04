@@ -629,10 +629,12 @@ async def chat_with_tools(user_msg: str, history: Optional[List[Dict[str, str]]]
     contents: List[Content] = []
     if history:
         for h in history:
-            # Mapeia o 'role' do frontend ('ai' ou 'user') para o 'role' do Gemini ('model' ou 'user')
-            role_from_frontend = h.get("role", "user") 
+            role_from_frontend = h.sender # <-- CORREÇÃO (era h.get("role", ...))
             gemini_role = "model" if role_from_frontend == "ai" else "user"
-            contents.append(Content(role=gemini_role, parts=[Part.from_text(h.get("content", ""))]))
+            
+            text_content = h.content.conteudo_texto # <-- CORREÇÃO (era h.get("content", ...))
+    
+            contents.append(Content(role=gemini_role, parts=[Part.from_text(text_content)]))
     contents.append(Content(role="user", parts=[Part.from_text(user_msg)]))
     tools = [toolset()]
     tool_steps: List[Dict[str, Any]] = []
@@ -680,9 +682,18 @@ async def chat_with_tools(user_msg: str, history: Optional[List[Dict[str, str]]]
 # =========================
 # Rotas FastAPI
 # =========================
+class MessageContent(BaseModel):
+    tipo_resposta: str
+    conteudo_texto: str
+    dados: Optional[Dict[str, Any]] = None
+
+class HistoryMessage(BaseModel):
+    sender: str # 'user', 'ai', ou 'system'
+    content: MessageContent
+
 class ChatRequest(BaseModel):
     pergunta: str
-    history: Optional[List[Dict[str, str]]] = None
+    history: Optional[List[HistoryMessage]] = None
     nome_usuario: Optional[str] = None
     email_usuario: Optional[str] = None
     id_usuario: Optional[str] = None
