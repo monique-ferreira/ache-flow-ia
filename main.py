@@ -1,6 +1,6 @@
 # main.py
 import os, io, re, time, asyncio
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from urllib.parse import urlparse, parse_qs, unquote, quote, urljoin
 from datetime import datetime, timedelta
 
