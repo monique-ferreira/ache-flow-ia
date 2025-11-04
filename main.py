@@ -61,10 +61,12 @@ APPLICATION_NAME = os.getenv("GOOGLE_CLOUD_APLICATION", "ai-service")
 GEMINI_MODEL_ID = os.getenv("GEMINI_MODEL_ID", "gemini-2.0-flash")
 
 API_KEY = os.getenv("API_KEY") 
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/acheflow")
-COLL_PROJETOS = os.getenv("MONGO_COLL_PROJETOS", "projetos")
-COLL_TAREFAS = os.getenv("MONGO_COLL_TAREFAS", "tarefas")
-COLL_FUNCIONARIOS = os.getenv("MONGO_COLL_FUNCIONARIOS", "funcionarios")
+# --- REMOVIDO: NÃO VAMOS MAIS USAR MONGO DIRETAMENTE ---
+# MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/acheflow")
+# COLL_PROJETOS = os.getenv("MONGO_COLL_PROJETOS", "projetos")
+# COLL_TAREFAS = os.getenv("MONGO_COLL_TAREFAS", "tarefas")
+# COLL_FUNCIONARIOS = os.getenv("MONGO_COLL_FUNCIONARIOS", "funcionarios")
+# --- FIM DA REMOÇÃO ---
 
 TASKS_API_BASE           = os.getenv("TASKS_API_BASE", "https://ache-flow-back.onrender.com").rstrip("/")
 TASKS_API_PROJECTS_PATH  = os.getenv("TASKS_API_PROJECTS_PATH", "/projetos")
@@ -84,7 +86,7 @@ DEFAULT_TOP_K = 8
 # =========================
 # FastAPI App (Único)
 # =========================
-app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="2.0.3") # Versão
+app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="2.0.4") # Versão
 
 # === ADICIONADO BLOCO CORS ===
 # Lista de domínios que podem acessar sua API
@@ -187,51 +189,41 @@ def sanitize_doc(data: Any) -> Any:
     # Se for qualquer outro tipo (int, str, bool, None), retorna como está
     return data
 
-def mongo():
-    if not MONGO_URI: 
-        raise RuntimeError("MONGO_URI não foi definida")
-    client = MongoClient(MONGO_URI)
-    try:
-        # get_default_database() PEGA O DB DA PRÓPRIA URI.
-        # Ex: ...mongodb.net/acheflow_db? -> usa 'acheflow_db'
-        db = client.get_default_database()
-        
-        # Forçamos uma checagem de conexão para garantir que a URI
-        # e as regras de Firewall do Atlas estão corretas.
-        db.command("ping") 
-        return db
-    except Exception as e:
-        # Se falhar, é provável que a URI esteja errada ou o IP do Cloud Run não esteja liberado
-        raise RuntimeError(f"Não foi possível conectar ao MongoDB. Verifique a MONGO_URI e o firewall do Atlas. Erro: {e}")
+# --- REMOVIDA: NÃO VAMOS MAIS USAR MONGO DIRETAMENTE ---
+# def mongo():
+# ...
+# --- FIM DA REMOÇÃO ---
 
 # === INÍCIO DAS NOVAS FUNÇÕES HELPER ===
 
-def _get_employee_map() -> Dict[str, str]:
+async def _get_employee_map(client: httpx.AsyncClient) -> Dict[str, str]:
     """
-    Helper para buscar todos os funcionários e criar um mapa de 
+    Helper para buscar todos os funcionários PELA API e criar um mapa de 
     { "id_do_funcionario": "Nome Sobrenome" }.
     """
     try:
-        # Busca apenas os campos necessários
-        employees_raw = mongo()[COLL_FUNCIONARIOS].find({}, {"nome": 1, "sobrenome": 1, "_id": 1})
-        employees = [sanitize_doc(x) for x in employees_raw]
+        employees = await list_funcionarios(client) # Chama a nova função de API
         
-        # O _id já é uma string por causa do sanitize_doc
         return {
             str(emp.get("_id")): f"{emp.get('nome', '')} {emp.get('sobrenome', '')}".strip()
             for emp in employees
             if emp.get("_id")
         }
     except Exception as e:
-        print(f"Erro ao buscar mapa de funcionários: {e}")
+        print(f"Erro ao buscar mapa de funcionários pela API: {e}")
         return {}
 
 def _enrich_doc_with_responsavel(doc: Dict[str, Any], employee_map: Dict[str, str]) -> Dict[str, Any]:
     """
-    Substitui 'responsavel_id' por 'responsavel_nome' em um projeto ou tarefa.
+    Substitui 'responsavel' (objeto) por 'responsavel_nome' (string).
     """
-    # Garante que o ID seja uma string (pode vir de um ObjectId ou DBRef sanitizado)
-    resp_id = str(doc.get("responsavel_id")) 
+    # --- CORREÇÃO: Lendo o ID de dentro do objeto 'responsavel' ---
+    resp_obj = doc.get("responsavel", {})
+    if isinstance(resp_obj, dict):
+        resp_id = str(resp_obj.get("id"))
+    else:
+        resp_id = None
+    # --- FIM DA CORREÇÃO ---
     
     if resp_id and resp_id != "None":
         if resp_id in employee_map:
@@ -244,8 +236,10 @@ def _enrich_doc_with_responsavel(doc: Dict[str, Any], employee_map: Dict[str, st
         # O projeto não tem responsável
         doc["responsavel_nome"] = "(Nenhum responsável)"
 
-    # Remove o ID para não confundir a IA
-    if "responsavel_id" in doc:
+    # Remove o objeto original para não confundir a IA
+    if "responsavel" in doc:
+        del doc["responsavel"]
+    if "responsavel_id" in doc: # Limpa o antigo também, por via das dúvidas
         del doc["responsavel_id"]
         
     return doc
@@ -336,7 +330,7 @@ def xlsx_bytes_to_dataframe_preserving_hyperlinks(xlsx_bytes: bytes) -> pd.DataF
             header = headers[i] if i < len(headers) else f"col{i+1}"; val = cell.value
             if i == col_idx_doc:
                 url = (getattr(cell.hyperlink, "target", None) if getattr(cell, "hyperlink", None) else None) or hyperlink_map.get(cell.coordinate)
-                if not url and isinstance(val, str) and val.strip().lower().startswith(("http://", "https://")): url = val.strip()
+                if not url and isinstance(val, str) and val.strip().lower().startswith(("http://", "https"://")): url = val.strip()
                 record[header] = url or (val if val is not None else "")
             else: record[header] = val if val is not None else ""
         rows.append(record)
@@ -344,7 +338,7 @@ def xlsx_bytes_to_dataframe_preserving_hyperlinks(xlsx_bytes: bytes) -> pd.DataF
 
 # =========================
 # Auth (Falar com API Render)
-# (Omitido por brevidade)
+# (Omitido por brevidade, está correto)
 # =========================
 _token_cache: Dict[str, Any] = {"access_token": None, "expires_at": 0, "user_id": None}
 async def get_auth_header(client: httpx.AsyncClient) -> Dict[str, str]:
@@ -379,11 +373,13 @@ async def get_api_auth_headers(client: httpx.AsyncClient, use_json: bool = True)
 
 # =========================
 # Lógica de Importação (do ai_api.py)
-# (Omitido por brevidade)
+# (Funções de API e lógica de importação)
 # =========================
 class CreateTaskItem(BaseModel):
     titulo: str; descricao: Optional[str] = None; responsavel: Optional[str] = None
     deadline: Optional[str] = None; doc_ref: Optional[str] = None; prazo_data: Optional[str] = None
+
+# --- ESSAS FUNÇÕES JÁ ESTAVAM CORRETAS ---
 async def create_project_api(client: httpx.AsyncClient, data: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{TASKS_API_BASE}{TASKS_API_PROJECTS_PATH}"
     auth_headers = await get_api_auth_headers(client, use_json=True)
@@ -399,34 +395,49 @@ async def create_task_api(client: httpx.AsyncClient, data: Dict[str, Any]) -> Di
     r = await client.post(url, json=payload, headers=auth_headers, timeout=TIMEOUT_S)
     r.raise_for_status()
     return r.json()
+# --- FIM DAS FUNÇÕES CORRETAS ---
+
+
+# --- INÍCIO DA REESCRITA DAS FUNÇÕES (AGORA USAM API) ---
 async def find_project_id_by_name(client: httpx.AsyncClient, projeto_nome: str) -> Optional[str]:
+    """Busca o ID de um projeto pelo nome, usando a API."""
     url = f"{TASKS_API_BASE}{TASKS_API_PROJECTS_PATH}"
     auth_headers = await get_api_auth_headers(client, use_json=True)
     r = await client.get(url, headers=auth_headers, timeout=TIMEOUT_S)
-    if r.status_code != 200: return None
+    if r.status_code != 200: 
+        return None
     try:
         items = r.json()
         if isinstance(items, list):
-            hit = next((p for p in items if str(p.get("nome")).lower() == projeto_nome.lower()), None)
+            hit = next((p for p in items if str(p.get("nome")).strip().lower() == projeto_nome.strip().lower()), None)
             return (hit or {}).get("_id") if hit else None
-    except Exception: return None
+    except Exception: 
+        return None
     return None
+
 async def list_funcionarios(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
+    """Lista todos os funcionários, usando a API."""
     url = f"{TASKS_API_BASE}/funcionarios"
     auth_headers = await get_api_auth_headers(client, use_json=True)
     r = await client.get(url, headers=auth_headers, timeout=TIMEOUT_S)
-    if r.status_code != 200: return []
-    try: return r.json() if isinstance(r.json(), list) else []
-    except Exception: return []
+    if r.status_code != 200: 
+        return []
+    try: 
+        return r.json() if isinstance(r.json(), list) else []
+    except Exception: 
+        return []
+# --- FIM DA REESCRITA ---
+
 async def resolve_responsavel_id(client: httpx.AsyncClient, nome_ou_email: Optional[str]) -> Optional[str]:
     nome_ou_email = (nome_ou_email or "").strip()
-    # --- ALTERAÇÃO IMPORTANTE ---
     # Se o nome for "eu", "eu mesmo", "para mim", etc., usa o ID do cache (usuário logado)
     if not nome_ou_email or nome_ou_email.lower() in ["eu", "eu mesmo", "me", "para mim", "eu sou responsável", "sou eu"]: 
         return _token_cache.get("user_id")
-    # --- FIM DA ALTERAÇÃO ---
     
+    # --- CORREÇÃO: AGORA CHAMA A FUNÇÃO DE API ---
     pessoas = await list_funcionarios(client)
+    # --- FIM DA CORREÇÃO ---
+    
     key = nome_ou_email.lower()
     if len(key) == 24 and all(c in '0123456789abcdef' for c in key):
         if any(p.get("_id") == key for p in pessoas): return key
@@ -438,6 +449,8 @@ async def resolve_responsavel_id(client: httpx.AsyncClient, nome_ou_email: Optio
     
     # Fallback: Se não achou NINGUÉM, retorna o ID do usuário logado
     return _token_cache.get("user_id")
+
+# --- LÓGICA DE IMPORTAÇÃO (Omitida por brevidade, está correta) ---
 def duration_to_date(duracao: Optional[str]) -> str:
     base = datetime.utcnow().date()
     try:
@@ -544,7 +557,6 @@ async def tasks_from_xlsx_logic(
 # =========================
 # Lógica da IA (do vertex_ai_service.py)
 # =========================
-# Em main.py, substitua a variável SYSTEM_PROMPT
 
 SYSTEM_PROMPT = """
 Você é o "Ache" — um assistente de produtividade virtual da plataforma Ache Flow.
@@ -588,6 +600,7 @@ CONHECIMENTO E DADOS DISPONÍVEIS
 ====================================================================
 As informações podem ser obtidas através das ferramentas (tools):
 - Para perguntas sobre "quantos" ou "número total" de projetos, use as ferramentas 'count_all_projects' ou 'count_projects_by_status'.
+- Para 'projetos ativos', 'em progresso', 'desenvolvimento', etc., use o status 'em andamento' nas ferramentas.
 - list_all_projects / list_all_tasks / list_all_funcionarios
 - list_tasks_by_deadline_range
 - list_projects_by_status
@@ -602,128 +615,158 @@ INTERPRETAÇÃO DE DATAS (BASE)
 - Intervalo de "este mês": {inicio_mes} até {fim_mes}.
 - **FORMATO DE DATA:** Sempre que pedir uma data ao usuário, peça no formato **DD-MM-AAAA**. Você deve converter internamente qualquer data DD-MM-AAAA para AAAA-MM-DD antes de usar nas ferramentas.
 ====================================================================
-CONTEXTO DO USUÁRIO
-====================================================================
-- O usuário logado é: {nome_usuario}
-- O email dele(a) é: {email_usuario}
-- O ID dele(a) é: {id_usuario}
-- Se o usuário disser "eu serei o responsável", "me atribua", "para mim", "sou eu", "eu mesmo", etc., use a palavra "eu" como valor para o campo 'responsavel' nas ferramentas.
-- NUNCA peça o ID do usuário. Se precisar de outro responsável, peça o nome ou email.
-"""
+""" # --- CONTEXTO DO USUÁRIO REMOVIDO, POIS AGORA É TRATADO PELO CÓDIGO ---
 
-# === INÍCIO DAS FUNÇÕES DE FERRAMENTA ATUALIZADAS ===
 
-def list_all_projects(top_k: int = 500) -> List[Dict[str, Any]]:
-    employee_map = _get_employee_map() # Pega o mapa de funcionários
-    projects_raw = mongo()[COLL_PROJETOS].find({}).sort("prazo", 1).limit(top_k)
-    projects_clean = [sanitize_doc(p) for p in projects_raw]
-    # Enriquece cada projeto com o nome do responsável
-    return [_enrich_doc_with_responsavel(p, employee_map) for p in projects_clean]
+# === INÍCIO DAS FUNÇÕES DE FERRAMENTA ATUALIZADAS (USANDO API) ===
 
-def list_all_tasks(top_k: int = 2000) -> List[Dict[str, Any]]:
-    employee_map = _get_employee_map() # Pega o mapa de funcionários
-    tasks_raw = mongo()[COLL_TAREFAS].find({}).sort("prazo", 1).limit(top_k)
-    tasks_clean = [sanitize_doc(t) for t in tasks_raw]
-    # Enriquece cada tarefa com o nome do responsável
-    return [_enrich_doc_with_responsavel(t, employee_map) for t in tasks_clean]
-
-def list_all_funcionarios(top_k: int = 500) -> List[Dict[str, Any]]:
-    # Esta função não precisa de enriquecimento, ela é a fonte
-    return [sanitize_doc(x) for x in mongo()[COLL_FUNCIONARIOS].find({}).sort("nome", 1).limit(top_k)]
-
-def list_tasks_by_deadline_range(start: str, end: str, top_k: int = 50) -> List[Dict[str, Any]]:
-    employee_map = _get_employee_map() # Pega o mapa de funcionários
-    tasks_raw = mongo()[COLL_TAREFAS].find({"prazo": {"$gte": start, "$lte": end}}).sort("prazo", 1).limit(top_k)
-    tasks_clean = [sanitize_doc(t) for t in tasks_raw]
-    # Enriquece cada tarefa com o nome do responsável
-    return [_enrich_doc_with_responsavel(t, employee_map) for t in tasks_clean]
-
-def list_projects_by_status(status: str, top_k: int = 50) -> List[Dict[str, Any]]:
-    status_norm = (status or "").strip().lower()
-    if status_norm in {"em andamento", "andamento", "ativo", "em_progresso", "em progresso", "executando"}:
-        rx = {"$regex": "(andament|progres|ativo|execut)", "$options": "i"}
-    else:
-        rx = {"$regex": re.escape(status_norm), "$options": "i"}
-        
-    employee_map = _get_employee_map() # Pega o mapa de funcionários
-    projects_raw = mongo()[COLL_PROJETOS].find({"situacao": rx}).sort("prazo", 1).limit(top_k)
-    projects_clean = [sanitize_doc(p) for p in projects_raw]
-    # Enriquece cada projeto com o nome do responsável
-    return [_enrich_doc_with_responsavel(p, employee_map) for p in projects_clean]
-
-def upcoming_deadlines(days: int = 14, top_k: int = 50) -> List[Dict[str, Any]]:
-    today_iso = iso_date(today()); limit_date = (today() + timedelta(days=days)).date().isoformat()
+async def list_all_projects(client: httpx.AsyncClient, top_k: int = 500) -> List[Dict[str, Any]]:
+    """Lista todos os projetos via API."""
+    url = f"{TASKS_API_BASE}{TASKS_API_PROJECTS_PATH}"
+    auth_headers = await get_api_auth_headers(client, use_json=True)
+    r = await client.get(url, headers=auth_headers, timeout=TIMEOUT_S)
+    r.raise_for_status()
+    projects_raw = r.json()
     
-    employee_map = _get_employee_map() # Pega o mapa de funcionários
-    tasks_raw = mongo()[COLL_TAREFAS].find({"prazo": {"$gte": today_iso, "$lte": limit_date}}).sort("prazo", 1).limit(top_k)
-    tasks_clean = [sanitize_doc(t) for t in tasks_raw]
-    # Enriquece cada tarefa com o nome do responsável
-    return [_enrich_doc_with_responsavel(t, employee_map) for t in tasks_clean]
+    employee_map = await _get_employee_map(client)
+    projects_clean = [sanitize_doc(p) for p in projects_raw]
+    return [_enrich_doc_with_responsavel(p, employee_map) for p in projects_clean][:top_k]
 
-def count_all_projects() -> int:
-    """Conta o número total de projetos no banco."""
+async def list_all_tasks(client: httpx.AsyncClient, top_k: int = 2000) -> List[Dict[str, Any]]:
+    """Lista todas as tarefas via API."""
+    url = f"{TASKS_API_BASE}{TASKS_API_TASKS_PATH}"
+    auth_headers = await get_api_auth_headers(client, use_json=True)
+    r = await client.get(url, headers=auth_headers, timeout=TIMEOUT_S)
+    r.raise_for_status()
+    tasks_raw = r.json()
+    
+    employee_map = await _get_employee_map(client)
+    tasks_clean = [sanitize_doc(t) for t in tasks_raw]
+    return [_enrich_doc_with_responsavel(t, employee_map) for t in tasks_clean][:top_k]
+
+async def list_all_funcionarios(client: httpx.AsyncClient, top_k: int = 500) -> List[Dict[str, Any]]:
+    """Lista todos os funcionários via API (implementação real)."""
+    funcionarios = await list_funcionarios(client) # Chama a função de API
+    return [sanitize_doc(f) for f in funcionarios][:top_k]
+
+async def list_tasks_by_deadline_range(client: httpx.AsyncClient, start: str, end: str, top_k: int = 50) -> List[Dict[str, Any]]:
+    """Lista tarefas por prazo via API (filtrando no Python)."""
+    all_tasks = await list_all_tasks(client, top_k=2000) # Busca todas
+    
+    # Filtra no python
+    filtered_tasks = [
+        t for t in all_tasks 
+        if t.get("prazo") and start <= t["prazo"] <= end
+    ]
+    return filtered_tasks[:top_k]
+
+async def list_projects_by_status(client: httpx.AsyncClient, status: str, top_k: int = 50) -> List[Dict[str, Any]]:
+    """Lista projetos por status via API (filtrando no Python)."""
+    all_projects = await list_all_projects(client, top_k=2000) # Busca todos
+    
+    status_norm = (status or "").strip().lower()
+    # --- REGEX ATUALIZADO ---
+    if status_norm in {"em andamento", "andamento", "ativo", "em_progresso", "em progresso", "executando", "desenvolvimento"}:
+        rx = re.compile(r"(andament|progres|ativo|execut|desenvolv)", re.IGNORECASE)
+    else:
+        rx = re.compile(re.escape(status_norm), re.IGNORECASE)
+    
+    # Filtra no python
+    filtered_projects = [
+        p for p in all_projects
+        if p.get("situacao") and rx.search(p["situacao"])
+    ]
+    
+    employee_map = await _get_employee_map(client)
+    return [_enrich_doc_with_responsavel(p, employee_map) for p in filtered_projects][:top_k]
+
+async def upcoming_deadlines(client: httpx.AsyncClient, days: int = 14, top_k: int = 50) -> List[Dict[str, Any]]:
+    """Lista prazos futuros via API (filtrando no Python)."""
+    today_iso = iso_date(today())
+    limit_date = (today() + timedelta(days=days)).date().isoformat()
+    
+    all_tasks = await list_all_tasks(client, top_k=2000) # Busca todas
+    
+    # Filtra no python
+    filtered_tasks = [
+        t for t in all_tasks 
+        if t.get("prazo") and today_iso <= t["prazo"] <= limit_date
+    ]
+    return filtered_tasks[:top_k]
+
+async def count_all_projects(client: httpx.AsyncClient) -> int:
+    """Conta todos os projetos via API."""
     try:
-        return len(list(mongo()[COLL_PROJETOS].find({}, {"_id": 1})))
+        projects = await list_all_projects(client, top_k=5000)
+        return len(projects)
     except Exception as e:
         print(f"Erro ao contar projetos: {e}")
         return -1
 
-def count_projects_by_status(status: str) -> int:
-    """Conta projetos com base em um status (ex: 'em andamento')."""
-    status_norm = (status or "").strip().lower()
-    if status_norm in {"em andamento", "andamento", "ativo", "em_progresso", "em progresso", "executando"}:
-        rx = {"$regex": "(andament|progres|ativo|execut)", "$options": "i"}
-    else:
-        rx = {"$regex": re.escape(status_norm), "$options": "i"}
-        
+async def count_projects_by_status(client: httpx.AsyncClient, status: str) -> int:
+    """Conta projetos por status via API."""
     try:
-        return len(list(mongo()[COLL_PROJETOS].find({"situacao": rx}, {"_id": 1})))
+        projects = await list_projects_by_status(client, status, top_k=5000)
+        return len(projects)
     except Exception as e:
         print(f"Erro ao contar projetos por status: {e}")
         return -1
 
-async def update_project(pid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
-    async with httpx.AsyncClient() as client:
-        auth_headers = await get_api_auth_headers(client, use_json=True)
-        allowed = {"nome", "descricao", "categoria", "situacao", "prazo", "responsavel_id"}
-        payload = {k: v for k, v in patch.items() if k in allowed and v is not None}
-        if not payload: raise ValueError("patch vazio")
-        url = f"{TASKS_API_BASE}/projetos/{pid}" 
-        resp = await client.put(url, json=payload, headers=auth_headers)
-        resp.raise_for_status(); return resp.json()
+async def update_project(client: httpx.AsyncClient, pid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
+    auth_headers = await get_api_auth_headers(client, use_json=True)
+    allowed = {"nome", "descricao", "categoria", "situacao", "prazo", "responsavel_id"}
+    payload = {k: v for k, v in patch.items() if k in allowed and v is not None}
+    if not payload: raise ValueError("patch vazio")
+    url = f"{TASKS_API_BASE}/projetos/{pid}" 
+    resp = await client.put(url, json=payload, headers=auth_headers)
+    resp.raise_for_status(); return resp.json()
 
-async def create_project(doc: Dict[str, Any]) -> Dict[str, Any]:
-    async with httpx.AsyncClient() as client:
-        data = pick(doc, ["nome", "situacao", "prazo", "descricao", "categoria"])
-        if not data.get("nome"): raise ValueError("nome é obrigatório")
-        
-        responsavel_str = doc.get("responsavel") 
-        resolved_id = await resolve_responsavel_id(client, responsavel_str)
-        data["responsavel_id"] = resolved_id
-        
-        return await create_project_api(client, data)
+async def create_project(client: httpx.AsyncClient, doc: Dict[str, Any]) -> Dict[str, Any]:
+    data = pick(doc, ["nome", "situacao", "prazo", "descricao", "categoria"])
+    if not data.get("nome"): raise ValueError("nome é obrigatório")
     
-async def create_task(doc: Dict[str, Any]) -> Dict[str, Any]:
-    async with httpx.AsyncClient() as client:
-        data = pick(doc, ["nome", "projeto_id", "descricao", "prioridade", "status", "data_inicio", "data_fim", "documento_referencia", "concluido"])
-        if not data.get("nome"): raise ValueError("nome é obrigatório")
+    responsavel_str = doc.get("responsavel") 
+    resolved_id = await resolve_responsavel_id(client, responsavel_str)
+    data["responsavel_id"] = resolved_id
+    
+    return await create_project_api(client, data)
+    
+async def create_task(client: httpx.AsyncClient, doc: Dict[str, Any]) -> Dict[str, Any]:
+    data = pick(doc, ["nome", "descricao", "prioridade", "status", "data_inicio", "data_fim", "documento_referencia", "concluido"])
+    if not data.get("nome"): raise ValueError("nome é obrigatório")
 
-        responsavel_str = doc.get("responsavel") 
-        resolved_id = await resolve_responsavel_id(client, responsavel_str)
-        data["responsavel_id"] = resolved_id
-        
-        return await create_task_api(client, data)
+    # --- CORREÇÃO: RESOLVER NOME DO PROJETO PARA ID ---
+    projeto_nome_ou_id = doc.get("projeto_id") # IA vai mandar nome ou ID aqui
+    resolved_proj_id = None
+    if projeto_nome_ou_id:
+        if len(projeto_nome_ou_id) == 24 and all(c in '0123456789abcdef' for c in projeto_nome_ou_id):
+             resolved_proj_id = projeto_nome_ou_id # Já é um ID
+        else:
+             resolved_proj_id = await find_project_id_by_name(client, projeto_nome_ou_id) # Busca pelo nome
     
-async def update_task(tid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
-    async with httpx.AsyncClient() as client:
-        auth_headers = await get_api_auth_headers(client, use_json=True)
-        allowed = {"nome", "descricao", "prioridade", "status", "data_inicio", "data_fim", "responsavel_id", "projeto_id"}
-        payload = {k: v for k, v in patch.items() if k in allowed and v is not None}
-        if not payload: raise ValueError("patch vazio")
-        url = f"{TASKS_API_BASE}/tarefas/{tid}" 
-        resp = await client.put(url, json=payload, headers=auth_headers)
-        resp.raise_for_status(); return resp.json()
+    if not resolved_proj_id:
+        raise ValueError(f"Projeto '{projeto_nome_ou_id}' não encontrado.")
+    
+    data["projeto_id"] = resolved_proj_id
+    # --- FIM DA CORREÇÃO ---
+
+    responsavel_str = doc.get("responsavel") 
+    resolved_id = await resolve_responsavel_id(client, responsavel_str)
+    data["responsavel_id"] = resolved_id
+    
+    return await create_task_api(client, data)
+    
+async def update_task(client: httpx.AsyncClient, tid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
+    auth_headers = await get_api_auth_headers(client, use_json=True)
+    allowed = {"nome", "descricao", "prioridade", "status", "data_inicio", "data_fim", "responsavel_id", "projeto_id"}
+    payload = {k: v for k, v in patch.items() if k in allowed and v is not None}
+    if not payload: raise ValueError("patch vazio")
+    url = f"{TASKS_API_BASE}/tarefas/{tid}" 
+    resp = await client.put(url, json=payload, headers=auth_headers)
+    resp.raise_for_status(); return resp.json()
+
 async def import_project_from_url_tool(
+    client: httpx.AsyncClient, # Adicionado client
     xlsx_url: str, 
     projeto_nome: str, 
     projeto_situacao: str, 
@@ -732,6 +775,17 @@ async def import_project_from_url_tool(
     projeto_descricao: Optional[str] = None,
     projeto_categoria: Optional[str] = None
 ) -> Dict[str, Any]:
+    # Esta função já usa a API, mas precisa do 'client'
+    # que não estava sendo passado.
+    # Vamos mockar o client dentro dela por enquanto,
+    # pois a lógica de `tasks_from_xlsx_logic` é síncrona
+    # e não está preparada para `await`.
+    # NOTA: `tasks_from_xlsx_logic` deve ser refatorada para async
+    # mas isso é uma mudança maior.
+    
+    # Solução rápida: `tasks_from_xlsx_logic` já usa `httpx.AsyncClient()`
+    # internamente, então está OK.
+    
     return await tasks_from_xlsx_logic(
         projeto_id=None, projeto_nome=projeto_nome,
         create_project_flag=1, projeto_situacao=projeto_situacao,
@@ -739,16 +793,19 @@ async def import_project_from_url_tool(
         projeto_descricao=projeto_descricao, projeto_categoria=projeto_categoria,
         xlsx_url=xlsx_url, file_bytes=None
     )
+# --- FIM DAS FUNÇÕES DE FERRAMENTA ATUALIZADAS ---
+
+
 def toolset() -> Tool:
     fns = [
         FunctionDeclaration(name="count_all_projects", description="Conta e retorna o número total de projetos.", parameters={"type": "object", "properties": {}}),
-        FunctionDeclaration(name="count_projects_by_status", description="Conta e retorna o número de projetos por status (ex: 'em andamento').", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
+        FunctionDeclaration(name="count_projects_by_status", description="Conta e retorna o número de projetos por status. Use 'em andamento' para status como 'ativo', 'desenvolvimento', 'em progresso', etc.", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
         FunctionDeclaration(name="list_all_projects", description="Lista todos os projetos.", parameters={"type": "object", "properties": {}}),
         FunctionDeclaration(name="list_all_tasks", description="Lista todas as tarefas.", parameters={"type": "object", "properties": {}}),
         FunctionDeclaration(name="list_all_funcionarios", description="Lista todos os funcionários.", parameters={"type": "object", "properties": {}}),
         FunctionDeclaration(name="list_tasks_by_deadline_range", description="Lista tarefas com prazo entre datas (YYYY-MM-DD).", parameters={"type": "object", "properties": {"start": {"type": "string"}, "end": {"type": "string"}}, "required": ["start", "end"]}),
         FunctionDeclaration(name="upcoming_deadlines", description="Lista tarefas com prazo vencendo nos próximos X dias.", parameters={"type": "object", "properties": {"days": {"type": "integer"}}, "required": ["days"]}),
-        FunctionDeclaration(name="list_projects_by_status", description="Lista projetos por status (ex: 'em andamento').", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
+        FunctionDeclaration(name="list_projects_by_status", description="Lista projetos por status. Use 'em andamento' para status como 'ativo', 'desenvolvimento', 'em progresso', etc.", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
         FunctionDeclaration(name="update_project", description="Atualiza campos de um projeto.", parameters={"type": "object", "properties": {"project_id": {"type": "string"}, "patch": {"type": "object", "properties": {"nome": {"type": "string"}, "situacao": {"type": "string"}, "prazo": {"type": "string"}}}}, "required": ["project_id", "patch"]}),
         FunctionDeclaration(name="create_project", description="Cria um novo projeto.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "responsavel": {"type": "string"}, "situacao": {"type": "string"}, "prazo": {"type": "string"}}, "required": ["nome", "responsavel", "situacao", "prazo"]}),
         FunctionDeclaration(name="create_task", description="Cria uma nova tarefa.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "projeto_id": {"type": "string"}, "responsavel": {"type": "string"}, "data_fim": {"type": "string"}, "data_inicio": {"type": "string"}, "status": {"type": "string"}}, "required": ["nome", "projeto_id", "responsavel", "data_fim", "data_inicio", "status"]}),
@@ -756,31 +813,38 @@ def toolset() -> Tool:
         FunctionDeclaration(name="import_project_from_url", description="Cria um projeto e importa tarefas a partir de uma URL de arquivo .xlsx.", parameters={"type": "object", "properties": {"xlsx_url": {"type": "string"}, "projeto_nome": {"type": "string"}, "projeto_situacao": {"type": "string"}, "projeto_prazo": {"type": "string"}, "projeto_responsavel": {"type": "string"}, "projeto_descricao": {"type": "string"}, "projeto_categoria": {"type": "string"}}, "required": ["xlsx_url", "projeto_nome", "projeto_situacao", "projeto_prazo", "projeto_responsavel"]}),
     ]
     return Tool(function_declarations=fns)
-async def exec_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+
+async def exec_tool(client: httpx.AsyncClient, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    """Executa a ferramenta chamada, agora passando o client."""
     try:
-        if name == "count_all_projects": return {"ok": True, "data": count_all_projects()}
-        if name == "count_projects_by_status": return {"ok": True, "data": count_projects_by_status(args["status"])}
-        if name == "list_all_projects": return {"ok": True, "data": list_all_projects(args.get("top_k", 500))}
-        if name == "list_all_tasks": return {"ok": True, "data": list_all_tasks(args.get("top_k", 2000))}
-        if name == "list_all_funcionarios": return {"ok": True, "data": list_all_funcionarios(args.get("top_k", 500))}
-        if name == "list_tasks_by_deadline_range": return {"ok": True, "data": list_tasks_by_deadline_range(args["start"], args["end"], args.get("top_k", 50))}
-        if name == "upcoming_deadlines": return {"ok": True, "data": upcoming_deadlines(args.get("days", 14), args.get("top_k", 50))}
-        if name == "list_projects_by_status": return {"ok": True, "data": list_projects_by_status(args["status"], args.get("top_k", 50))}
-        if name == "update_project": return {"ok": True, "data": await update_project(args["project_id"], args.get("patch", {}))}
-        if name == "create_project": return {"ok": True, "data": await create_project(args)}
-        if name == "create_task": return {"ok": True, "data": await create_task(args)}
-        if name == "update_task": return {"ok": True, "data": await update_task(args["task_id"], args.get("patch", {}))}
-        if name == "import_project_from_url": return {"ok": True, "data": await import_project_from_url_tool(**args)}
+        # --- TODAS AS FUNÇÕES AGORA SÃO ASYNC E RECEBEM 'client' ---
+        if name == "count_all_projects": return {"ok": True, "data": await count_all_projects(client)}
+        if name == "count_projects_by_status": return {"ok": True, "data": await count_projects_by_status(client, args["status"])}
+        if name == "list_all_projects": return {"ok": True, "data": await list_all_projects(client, args.get("top_k", 500))}
+        if name == "list_all_tasks": return {"ok": True, "data": await list_all_tasks(client, args.get("top_k", 2000))}
+        if name == "list_all_funcionarios": return {"ok": True, "data": await list_all_funcionarios(client, args.get("top_k", 500))}
+        if name == "list_tasks_by_deadline_range": return {"ok": True, "data": await list_tasks_by_deadline_range(client, args["start"], args["end"], args.get("top_k", 50))}
+        if name == "upcoming_deadlines": return {"ok": True, "data": await upcoming_deadlines(client, args.get("days", 14), args.get("top_k", 50))}
+        if name == "list_projects_by_status": return {"ok": True, "data": await list_projects_by_status(client, args["status"], args.get("top_k", 50))}
+        if name == "update_project": return {"ok": True, "data": await update_project(client, args["project_id"], args.get("patch", {}))}
+        if name == "create_project": return {"ok": True, "data": await create_project(client, args)}
+        if name == "create_task": return {"ok": True, "data": await create_task(client, args)}
+        if name == "update_task": return {"ok": True, "data": await update_task(client, args["task_id"], args.get("patch", {}))}
+        if name == "import_project_from_url": return {"ok": True, "data": await import_project_from_url_tool(client, **args)}
         return {"ok": False, "error": f"função desconhecida: {name}"}
     except Exception as e:
         detail = str(e)
         if isinstance(e, httpx.HTTPStatusError):
             try: 
-                err_json = e.response.json() # --- BUG CORRIGIDO AQUI ---
+                err_json = e.response.json()
                 detail = err_json.get("detail", err_json.get("erro", str(e)))
             except Exception: 
                 detail = e.response.text
+        # --- MELHORIA NO LOG DE ERRO ---
+        print(f"Erro ao executar ferramenta '{name}': {detail}")
+        # --- FIM DA MELHORIA ---
         return {"ok": False, "error": detail}
+
 def _normalize_answer(raw: str, nome_usuario: str) -> str:
     raw = re.sub(r"[*_`#>]+", "", raw).strip()
     if all(sym not in raw for sym in ("🙂", "😊", "👋")):
@@ -790,7 +854,6 @@ def init_model(system_instruction: str) -> GenerativeModel:
     vertex_init(project=PROJECT_ID, location=LOCATION) 
     return GenerativeModel(GEMINI_MODEL_ID, system_instruction=system_instruction)
 async def chat_with_tools(user_msg: str, history: Optional[List[HistoryMessage]] = None, nome_usuario: Optional[str] = None, email_usuario: Optional[str] = None, id_usuario: Optional[str] = None) -> Dict[str, Any]:
-    # --- BUG CORRIGIDO AQUI ---
     data_hoje, (inicio_mes, fim_mes) = iso_date(today()), month_bounds(today())
     nome_usuario = nome_usuario or "você"
     email_usuario = email_usuario or "email.desconhecido"
@@ -803,54 +866,50 @@ async def chat_with_tools(user_msg: str, history: Optional[List[HistoryMessage]]
     contents: List[Content] = []
     if history:
         for h in history:
-            role_from_frontend = h.sender # <-- CORREÇÃO (era h.get("role", ...))
+            role_from_frontend = h.sender
             gemini_role = "model" if role_from_frontend == "ai" else "user"
-            
-            text_content = h.content.conteudo_texto # <-- CORREÇÃO (era h.get("content", ...))
-    
+            text_content = h.content.conteudo_texto
             contents.append(Content(role=gemini_role, parts=[Part.from_text(text_content)]))
     contents.append(Content(role="user", parts=[Part.from_text(user_msg)]))
     tools = [toolset()]
     tool_steps: List[Dict[str, Any]] = []
-    for step in range(MAX_TOOL_STEPS):
-        resp = model.generate_content(contents, tools=tools)
-        calls = []
-        # --- INÍCIO DA CORREÇÃO ---
-        # Precisamos capturar a resposta completa do modelo (que contém o FunctionCall)
-        # para adicioná-la ao histórico.
-        model_response_content = None
-        if resp.candidates and resp.candidates[0].content:
-            model_response_content = resp.candidates[0].content
-            if model_response_content.parts:
-                for part in model_response_content.parts:
-                    if getattr(part, "function_call", None): 
-                        calls.append(part.function_call)
-        # --- FIM DA CORREÇÃO ---
+    
+    # --- NOVO: Criar um http client para ser usado por todas as ferramentas ---
+    async with httpx.AsyncClient() as client:
+        # Preenche o cache de autenticação antes de tudo
+        await get_api_auth_headers(client) 
+        
+        for step in range(MAX_TOOL_STEPS):
+            resp = model.generate_content(contents, tools=tools)
+            calls = []
+            model_response_content = None
+            if resp.candidates and resp.candidates[0].content:
+                model_response_content = resp.candidates[0].content
+                if model_response_content.parts:
+                    for part in model_response_content.parts:
+                        if getattr(part, "function_call", None): 
+                            calls.append(part.function_call)
 
-        if not calls:
-            # Se não há chamadas de função, é a resposta final.
-            final_text = ""
-            if resp.candidates and resp.candidates[0].content and resp.candidates[0].content.parts:
-                final_text = getattr(resp.candidates[0].content.parts[0], "text", "") or ""
-            final_text = re.sub(r"(?i)(aguarde( um instante)?|só um momento|apenas um instante)[^\n]*", "", final_text).strip()
-            return {"answer": _normalize_answer(final_text, nome_usuario), "tool_steps": tool_steps}
+            if not calls:
+                final_text = ""
+                if resp.candidates and resp.candidates[0].content and resp.candidates[0].content.parts:
+                    final_text = getattr(resp.candidates[0].content.parts[0], "text", "") or ""
+                final_text = re.sub(r"(?i)(aguarde( um instante)?|só um momento|apenas um instante)[^\n]*", "", final_text).strip()
+                return {"answer": _normalize_answer(final_text, nome_usuario), "tool_steps": tool_steps}
 
-        # --- INÍCIO DA CORREÇÃO ---
-        # Adiciona a resposta do modelo (o "FunctionCall") ao histórico
-        # ANTES de adicionar os resultados da ferramenta.
-        if model_response_content:
-            contents.append(model_response_content) 
-        # --- FIM DA CORREÇÃO ---
-            
-        for fc in calls:
-            name, args = fc.name, {k: v for k, v in (fc.args or {}).items()}
-            if name in ("list_projects_by_deadline_range", "list_tasks_by_deadline_range") and (not args.get("start") or not args.get("end")):
-                args["start"], args["end"] = inicio_mes, fim_mes
-            result = await exec_tool(name, args)
-            tool_steps.append({"call": {"name": name, "args": args}, "result": result})
-            
-            # Adiciona o resultado da ferramenta ao histórico
-            contents.append(Content(role="tool", parts=[Part.from_function_response(name=name, response=result)]))
+            if model_response_content:
+                contents.append(model_response_content) 
+                
+            for fc in calls:
+                name, args = fc.name, {k: v for k, v in (fc.args or {}).items()}
+                if name in ("list_projects_by_deadline_range", "list_tasks_by_deadline_range") and (not args.get("start") or not args.get("end")):
+                    args["start"], args["end"] = inicio_mes, fim_mes
+                
+                # --- NOVO: Passa o 'client' para o executor ---
+                result = await exec_tool(client, name, args)
+                tool_steps.append({"call": {"name": name, "args": args}, "result": result})
+                
+                contents.append(Content(role="tool", parts=[Part.from_function_response(name=name, response=result)]))
             
     return {"answer": _normalize_answer("Concluí as ações solicitadas.", nome_usuario), "tool_steps": tool_steps}
 # =========================
@@ -862,8 +921,8 @@ async def ai_chat(req: ChatRequest, _=Depends(require_api_key)):
         user_msg=req.pergunta, 
         history=req.history, 
         nome_usuario=req.nome_usuario,
-        email_usuario=req.email_usuario, # <-- ADICIONADO
-        id_usuario=req.id_usuario        # <-- ADICIONADO
+        email_usuario=req.email_usuario,
+        id_usuario=req.id_usuario
     )
     response_data = {
         "tipo_resposta": "TEXTO",
