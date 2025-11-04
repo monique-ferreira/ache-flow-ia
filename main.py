@@ -573,6 +573,7 @@ TOM E ESTILO DE RESPOSTA
 CONHECIMENTO E DADOS DISPONÍVEIS
 ====================================================================
 As informações podem ser obtidas através das ferramentas (tools):
+- Para perguntas sobre "quantos" ou "número total" de projetos, use as ferramentas 'count_all_projects' ou 'count_projects_by_status'.
 - list_all_projects / list_all_tasks / list_all_funcionarios
 - list_tasks_by_deadline_range
 - list_projects_by_status
@@ -645,8 +646,27 @@ def upcoming_deadlines(days: int = 14, top_k: int = 50) -> List[Dict[str, Any]]:
     # Enriquece cada tarefa com o nome do responsável
     return [_enrich_doc_with_responsavel(t, employee_map) for t in tasks_clean]
 
-# === FIM DAS FUNÇÕES DE FERRAMENTA ATUALIZADAS ===
+def count_all_projects() -> int:
+    """Conta o número total de projetos no banco."""
+    try:
+        return mongo()[COLL_PROJETOS].count_documents({})
+    except Exception as e:
+        print(f"Erro ao contar projetos: {e}")
+        return -1
 
+def count_projects_by_status(status: str) -> int:
+    """Conta projetos com base em um status (ex: 'em andamento')."""
+    status_norm = (status or "").strip().lower()
+    if status_norm in {"em andamento", "andamento", "ativo", "em_progresso", "em progresso", "executando"}:
+        rx = {"$regex": "(andament|progres|ativo|execut)", "$options": "i"}
+    else:
+        rx = {"$regex": re.escape(status_norm), "$options": "i"}
+        
+    try:
+        return mongo()[COLL_PROJETOS].count_documents({"situacao": rx})
+    except Exception as e:
+        print(f"Erro ao contar projetos por status: {e}")
+        return -1
 
 async def update_project(pid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
@@ -657,11 +677,18 @@ async def update_project(pid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
         url = f"{TASKS_API_BASE}/projetos/{pid}" 
         resp = await client.put(url, json=payload, headers=auth_headers)
         resp.raise_for_status(); return resp.json()
+# Substitua a função original 'create_project' por esta:
 async def create_project(doc: Dict[str, Any]) -> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
-        data = pick(doc, ["nome", "responsavel_id", "situacao", "prazo", "descricao", "categoria"])
+        data = pick(doc, ["nome", "situacao", "prazo", "descricao", "categoria"])
         if not data.get("nome"): raise ValueError("nome é obrigatório")
+        
+        responsavel_str = doc.get("responsavel") 
+        resolved_id = await resolve_responsavel_id(client, responsavel_str)
+        data["responsavel_id"] = resolved_id
+        
         return await create_project_api(client, data)
+    
 async def create_task(doc: Dict[str, Any]) -> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
         data = pick(doc, ["nome", "projeto_id", "responsavel_id", "descricao", "prioridade", "status", "data_inicio", "data_fim", "documento_referencia", "concluido"])
@@ -694,6 +721,8 @@ async def import_project_from_url_tool(
     )
 def toolset() -> Tool:
     fns = [
+        FunctionDeclaration(name="count_all_projects", description="Conta e retorna o número total de projetos.", parameters={"type": "object", "properties": {}}),
+        FunctionDeclaration(name="count_projects_by_status", description="Conta e retorna o número de projetos por status (ex: 'em andamento').", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
         FunctionDeclaration(name="list_all_projects", description="Lista todos os projetos.", parameters={"type": "object", "properties": {}}),
         FunctionDeclaration(name="list_all_tasks", description="Lista todas as tarefas.", parameters={"type": "object", "properties": {}}),
         FunctionDeclaration(name="list_all_funcionarios", description="Lista todos os funcionários.", parameters={"type": "object", "properties": {}}),
@@ -701,7 +730,7 @@ def toolset() -> Tool:
         FunctionDeclaration(name="upcoming_deadlines", description="Lista tarefas com prazo vencendo nos próximos X dias.", parameters={"type": "object", "properties": {"days": {"type": "integer"}}, "required": ["days"]}),
         FunctionDeclaration(name="list_projects_by_status", description="Lista projetos por status (ex: 'em andamento').", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
         FunctionDeclaration(name="update_project", description="Atualiza campos de um projeto.", parameters={"type": "object", "properties": {"project_id": {"type": "string"}, "patch": {"type": "object", "properties": {"nome": {"type": "string"}, "situacao": {"type": "string"}, "prazo": {"type": "string"}}}}, "required": ["project_id", "patch"]}),
-        FunctionDeclaration(name="create_project", description="Cria um novo projeto.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "responsavel_id": {"type": "string"}, "situacao": {"type": "string"}, "prazo": {"type": "string"}}, "required": ["nome", "responsavel_id", "situacao", "prazo"]}),
+        FunctionDeclaration(name="create_project", description="Cria um novo projeto.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "responsavel": {"type": "string"}, "situacao": {"type": "string"}, "prazo": {"type": "string"}}, "required": ["nome", "responsavel", "situacao", "prazo"]}),
         FunctionDeclaration(name="create_task", description="Cria uma nova tarefa.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "projeto_id": {"type": "string"}, "responsavel_id": {"type": "string"}, "data_fim": {"type": "string"}, "data_inicio": {"type": "string"}, "status": {"type": "string"}}, "required": ["nome", "projeto_id", "responsavel_id", "data_fim", "data_inicio", "status"]}),
         FunctionDeclaration(name="update_task", description="Atualiza campos de uma tarefa.", parameters={"type": "object", "properties": {"task_id": {"type": "string"}, "patch": {"type": "object", "properties": {"nome": {"type": "string"}, "status": {"type": "string"}, "data_fim": {"type": "string"}, "responsavel_id": {"type": "string"}}}}, "required": ["task_id", "patch"]}),
         FunctionDeclaration(name="import_project_from_url", description="Cria um projeto e importa tarefas a partir de uma URL de arquivo .xlsx.", parameters={"type": "object", "properties": {"xlsx_url": {"type": "string"}, "projeto_nome": {"type": "string"}, "projeto_situacao": {"type": "string"}, "projeto_prazo": {"type": "string"}, "projeto_responsavel": {"type": "string"}, "projeto_descricao": {"type": "string"}, "projeto_categoria": {"type": "string"}}, "required": ["xlsx_url", "projeto_nome", "projeto_situacao", "projeto_prazo", "projeto_responsavel"]}),
@@ -709,6 +738,8 @@ def toolset() -> Tool:
     return Tool(function_declarations=fns)
 async def exec_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     try:
+        if name == "count_all_projects": return {"ok": True, "data": count_all_projects()}
+        if name == "count_projects_by_status": return {"ok": True, "data": count_projects_by_status(args["status"])}
         if name == "list_all_projects": return {"ok": True, "data": list_all_projects(args.get("top_k", 500))}
         if name == "list_all_tasks": return {"ok": True, "data": list_all_tasks(args.get("top_k", 2000))}
         if name == "list_all_funcionarios": return {"ok": True, "data": list_all_funcionarios(args.get("top_k", 500))}
