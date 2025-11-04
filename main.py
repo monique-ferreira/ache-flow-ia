@@ -142,13 +142,21 @@ def month_bounds(d: datetime) -> Tuple[str, str]:
 def to_oid(id_str: str) -> ObjectId:
     try: return ObjectId(id_str)
     except Exception: return id_str
+
 def pick(d: Dict[str, Any], keys: List[str]) -> Dict[str, Any]:
     return {k: d.get(k) for k in keys if k in d}
+
 def sanitize_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
     if not doc: return doc
-    out: Dict[str, Any] = {k: str(v) if isinstance(v, ObjectId) else v for k, v in doc.items()}
+    out: Dict[str, Any] = {}
+    for k, v in doc.items():
+        if isinstance(v, ObjectId):
+            out[k] = str(v)
+        elif isinstance(v, (datetime, datetime.date)): # <--- ESTA É A CORREÇÃO
+            out[k] = v.isoformat() # Converte datas para string no formato ISO (AAAA-MM-DD)
+        else:
+            out[k] = v
     return out
-# Em main.py, substitua a função mongo()
 
 def mongo():
     if not MONGO_URI: 
