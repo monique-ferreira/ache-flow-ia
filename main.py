@@ -36,6 +36,22 @@ from openpyxl.utils import range_boundaries
 from dotenv import load_dotenv
 load_dotenv()
 
+class MessageContent(BaseModel):
+    tipo_resposta: str
+    conteudo_texto: str
+    dados: Optional[List[Any]] = None
+
+class HistoryMessage(BaseModel):
+    sender: str # 'user', 'ai', ou 'system'
+    content: MessageContent
+
+class ChatRequest(BaseModel):
+    pergunta: str
+    history: Optional[List[HistoryMessage]] = None
+    nome_usuario: Optional[str] = None
+    email_usuario: Optional[str] = None
+    id_usuario: Optional[str] = None
+
 # =========================
 # Config
 # =========================
@@ -690,22 +706,6 @@ async def chat_with_tools(user_msg: str, history: Optional[List[HistoryMessage]]
 # =========================
 # Rotas FastAPI
 # =========================
-class MessageContent(BaseModel):
-    tipo_resposta: str
-    conteudo_texto: str
-    dados: Optional[List[Any]] = None
-
-class HistoryMessage(BaseModel):
-    sender: str # 'user', 'ai', ou 'system'
-    content: MessageContent
-
-class ChatRequest(BaseModel):
-    pergunta: str
-    history: Optional[List[HistoryMessage]] = None
-    nome_usuario: Optional[str] = None
-    email_usuario: Optional[str] = None
-    id_usuario: Optional[str] = None
-
 @app.post("/ai/chat")
 async def ai_chat(req: ChatRequest, _=Depends(require_api_key)):
     out = await chat_with_tools(
