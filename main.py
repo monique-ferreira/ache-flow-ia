@@ -496,8 +496,11 @@ def list_tasks_by_deadline_range(start: str, end: str, top_k: int = 50) -> List[
     return [sanitize_doc(x) for x in mongo()[COLL_TAREFAS].find({"prazo": {"$gte": start, "$lte": end}}).sort("prazo", 1).limit(top_k)]
 def list_projects_by_status(status: str, top_k: int = 50) -> List[Dict[str, Any]]:
     status_norm = (status or "").strip().lower()
-    rx = {"$regex": "(andament|progres|ativo|execut)", "$options": "i"} if status_norm in {"em andamento", "andamento", "ativo", "em_progresso", "em progresso", "executando"} else {"$regex": re.escape(status_norm), "$options": "i"}
-    return [sanitize_doc(x) for x in mongo()[COLL_PROJETOS].find({"$or": [{"situacao": rx}, {"status": rx}]}).sort("prazo", 1).limit(top_k)]
+    if status_norm in {"em andamento", "andamento", "ativo", "em_progresso", "em progresso", "executando"}:
+        rx = {"$regex": "(andament|progres|ativo|execut)", "$options": "i"}
+    else:
+        rx = {"$regex": re.escape(status_norm), "$options": "i"}      
+    return [sanitize_doc(x) for x in mongo()[COLL_PROJETOS].find({"situacao": rx}).sort("prazo", 1).limit(top_k)]
 def upcoming_deadlines(days: int = 14, top_k: int = 50) -> List[Dict[str, Any]]:
     today_iso = iso_date(today()); limit_date = (today() + timedelta(days=days)).date().isoformat()
     return [sanitize_doc(x) for x in mongo()[COLL_TAREFAS].find({"prazo": {"$gte": today_iso, "$lte": limit_date}}).sort("prazo", 1).limit(top_k)]
@@ -610,24 +613,44 @@ async def chat_with_tools(user_msg: str, history: Optional[List[Dict[str, str]]]
     for step in range(MAX_TOOL_STEPS):
         resp = model.generate_content(contents, tools=tools)
         calls = []
-        if resp.candidates and resp.candidates[0].content and resp.candidates[0].content.parts:
-            for part in resp.candidates[0].content.parts:
-                if getattr(part, "function_call", None): calls.append(part.function_call)
+        # --- INÍCIO DA CORREÇÃO ---
+        # Precisamos capturar a resposta completa do modelo (que contém o FunctionCall)
+        # para adicioná-la ao histórico.
+        model_response_content = None
+        if resp.candidates and resp.candidates[0].content:
+            model_response_content = resp.candidates[0].content
+            if model_response_content.parts:
+                for part in model_response_content.parts:
+                    if getattr(part, "function_call", None): 
+                        calls.append(part.function_call)
+        # --- FIM DA CORREÇÃO ---
+
         if not calls:
+            # Se não há chamadas de função, é a resposta final.
             final_text = ""
             if resp.candidates and resp.candidates[0].content and resp.candidates[0].content.parts:
                 final_text = getattr(resp.candidates[0].content.parts[0], "text", "") or ""
             final_text = re.sub(r"(?i)(aguarde( um instante)?|só um momento|apenas um instante)[^\n]*", "", final_text).strip()
             return {"answer": _normalize_answer(final_text, nome_usuario), "tool_steps": tool_steps}
+
+        # --- INÍCIO DA CORREÇÃO ---
+        # Adiciona a resposta do modelo (o "FunctionCall") ao histórico
+        # ANTES de adicionar os resultados da ferramenta.
+        if model_response_content:
+            contents.append(model_response_content) 
+        # --- FIM DA CORREÇÃO ---
+            
         for fc in calls:
             name, args = fc.name, {k: v for k, v in (fc.args or {}).items()}
             if name in ("list_projects_by_deadline_range", "list_tasks_by_deadline_range") and (not args.get("start") or not args.get("end")):
                 args["start"], args["end"] = inicio_mes, fim_mes
             result = await exec_tool(name, args)
             tool_steps.append({"call": {"name": name, "args": args}, "result": result})
+            
+            # Adiciona o resultado da ferramenta ao histórico
             contents.append(Content(role="tool", parts=[Part.from_function_response(name=name, response=result)]))
+            
     return {"answer": _normalize_answer("Concluí as ações solicitadas.", nome_usuario), "tool_steps": tool_steps}
-
 # =========================
 # Rotas FastAPI
 # =========================
