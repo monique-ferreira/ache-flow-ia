@@ -330,7 +330,11 @@ def xlsx_bytes_to_dataframe_preserving_hyperlinks(xlsx_bytes: bytes) -> pd.DataF
             header = headers[i] if i < len(headers) else f"col{i+1}"; val = cell.value
             if i == col_idx_doc:
                 url = (getattr(cell.hyperlink, "target", None) if getattr(cell, "hyperlink", None) else None) or hyperlink_map.get(cell.coordinate)
-                if not url and isinstance(val, str) and val.strip().lower().startswith(("http://", "https"://")): url = val.strip()
+                
+                # --- INÍCIO DA CORREÇÃO (LINHA 333) ---
+                if not url and isinstance(val, str) and val.strip().lower().startswith(("http://", "https://")): url = val.strip()
+                # --- FIM DA CORREÇÃO ---
+                
                 record[header] = url or (val if val is not None else "")
             else: record[header] = val if val is not None else ""
         rows.append(record)
