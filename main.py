@@ -162,17 +162,26 @@ def to_oid(id_str: str) -> ObjectId:
 def pick(d: Dict[str, Any], keys: List[str]) -> Dict[str, Any]:
     return {k: d.get(k) for k in keys if k in d}
 
-def sanitize_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
-    if not doc: return doc
-    out: Dict[str, Any] = {}
-    for k, v in doc.items():
-        if isinstance(v, ObjectId):
-            out[k] = str(v)
-        elif isinstance(v, (datetime, datetime.date)): # <--- Esta linha é a correção
-            out[k] = v.isoformat() # Converte datas para string
-        else:
-            out[k] = v
-    return out
+# main.py - Linha 160 (VERSÃO NOVA E RECURSIVA)
+def sanitize_doc(data: Any) -> Any:
+    # Se for um datetime ou date, converte para string
+    if isinstance(data, (datetime, date)):
+        return data.isoformat()
+    
+    # Se for um ObjectId, converte para string
+    if isinstance(data, ObjectId):
+        return str(data)
+    
+    # --- NOVO: Se for um dicionário (dict), chama a função recursivamente para cada valor ---
+    if isinstance(data, dict):
+        return {k: sanitize_doc(v) for k, v in data.items()}
+    
+    # --- NOVO: Se for uma lista (list), chama a função recursivamente para cada item ---
+    if isinstance(data, list):
+        return [sanitize_doc(item) for item in data]
+    
+    # Se for qualquer outro tipo (int, str, bool, None), retorna como está
+    return data
 
 def mongo():
     if not MONGO_URI: 
