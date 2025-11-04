@@ -203,7 +203,55 @@ def mongo():
     except Exception as e:
         # Se falhar, é provável que a URI esteja errada ou o IP do Cloud Run não esteja liberado
         raise RuntimeError(f"Não foi possível conectar ao MongoDB. Verifique a MONGO_URI e o firewall do Atlas. Erro: {e}")
+
+# === INÍCIO DAS NOVAS FUNÇÕES HELPER ===
+
+def _get_employee_map() -> Dict[str, str]:
+    """
+    Helper para buscar todos os funcionários e criar um mapa de 
+    { "id_do_funcionario": "Nome Sobrenome" }.
+    """
+    try:
+        # Busca apenas os campos necessários
+        employees_raw = mongo()[COLL_FUNCIONARIOS].find({}, {"nome": 1, "sobrenome": 1, "_id": 1})
+        employees = [sanitize_doc(x) for x in employees_raw]
+        
+        # O _id já é uma string por causa do sanitize_doc
+        return {
+            str(emp.get("_id")): f"{emp.get('nome', '')} {emp.get('sobrenome', '')}".strip()
+            for emp in employees
+            if emp.get("_id")
+        }
+    except Exception as e:
+        print(f"Erro ao buscar mapa de funcionários: {e}")
+        return {}
+
+def _enrich_doc_with_responsavel(doc: Dict[str, Any], employee_map: Dict[str, str]) -> Dict[str, Any]:
+    """
+    Substitui 'responsavel_id' por 'responsavel_nome' em um projeto ou tarefa.
+    """
+    # Garante que o ID seja uma string (pode vir de um ObjectId ou DBRef sanitizado)
+    resp_id = str(doc.get("responsavel_id")) 
     
+    if resp_id and resp_id != "None":
+        if resp_id in employee_map:
+            # Sucesso: Encontrou o nome
+            doc["responsavel_nome"] = employee_map[resp_id]
+        else:
+            # Falha: O ID existe mas não foi encontrado no mapa
+            doc["responsavel_nome"] = f"(ID não encontrado: {resp_id})"
+    else:
+        # O projeto não tem responsável
+        doc["responsavel_nome"] = "(Nenhum responsável)"
+
+    # Remove o ID para não confundir a IA
+    if "responsavel_id" in doc:
+        del doc["responsavel_id"]
+        
+    return doc
+
+# === FIM DAS NOVAS FUNÇÕES HELPER ===
+
 # =========================
 # Helpers de Download (PDF/XLSX)
 # (Omitidos por brevidade)
@@ -488,7 +536,6 @@ async def tasks_from_xlsx_logic(
 
 # =========================
 # Lógica da IA (do vertex_ai_service.py)
-# (Omitido por brevidade)
 # =========================
 # Em main.py, substitua a variável SYSTEM_PROMPT
 
@@ -518,8 +565,9 @@ TOM E ESTILO DE RESPOSTA
 - Use linguagem clara, leve e natural.
 - Nunca use markdown, asteriscos (*), negrito, nem blocos de código.
 - **REGRA CRÍTICA DE RESPOSTA:** Após usar uma ferramenta, você receberá os dados. Sua resposta final para o usuário deve ser um RESUMO em linguagem natural desses dados. NUNCA, em hipótese alguma, mostre o nome da ferramenta (como 'list_all_projects') ou qualquer pseudo-código (como 'print(...)') para o usuário. Apenas forneça a resposta em português.
-- **REGRA CRÍTICA DE REFERÊNCIA DE DADOS:** Os projetos e tarefas que eu te retornar conterão apenas um 'responsavel_id' (um ID de funcionário, como '6902b874...'). Você NUNCA deve inventar um nome para este ID (como "Laura" ou "Ricardo"). Para responder quem é o responsável, você DEVE primeiro usar a ferramenta 'list_all_funcionarios', obter a lista de todos os funcionários reais, e então usar o 'responsavel_id' do projeto para encontrar o nome ('nome') e sobrenome ('sobrenome') corretos do funcionário correspondente.
-- **PLANO DE FALHA:** Se você não encontrar um funcionário com aquele ID na lista de funcionários, você DEVE responder "Responsável: (ID não encontrado: [ID_AQUI])". NUNCA, SOB NENHUMA CIRCUNSTÂNCIA, INVENTE UM NOME.
+- **REGRA DE FORMATAÇÃO DE LISTA:** Ao listar projetos ou tarefas, use listas simples (hífen e espaço). Os dados (como 'responsavel_nome' e 'prazo') já virão prontos para você. Formate a resposta de forma clara. Exemplo:
+    - Projeto Phoenix (Responsável: João Silva, Prazo: 2025-12-31)
+    - Projeto Kilo (Responsável: Maria Souza, Prazo: 2025-11-10)
 - **NÃO PEÇA PERMISSÃO:** Você DEVE usar as ferramentas proativamente. Se uma pergunta pode ser respondida por uma ferramenta (como list_all_projects), USE A FERRAMENTA. Nunca pergunte "Quer que eu faça X?" ou "Posso buscar Y?". Apenas execute e retorne a resposta.
 ====================================================================
 CONHECIMENTO E DADOS DISPONÍVEIS
@@ -547,24 +595,59 @@ CONTEXTO DO USUÁRIO
 - Se o usuário disser "eu serei o responsável", "me atribua", "para mim", etc., use o ID '{id_usuario}' como 'responsavel_id' nas ferramentas.
 - NUNCA peça o ID do usuário. Se precisar de outro responsável, peça o nome ou email.
 """
+
+# === INÍCIO DAS FUNÇÕES DE FERRAMENTA ATUALIZADAS ===
+
 def list_all_projects(top_k: int = 500) -> List[Dict[str, Any]]:
-    return [sanitize_doc(x) for x in mongo()[COLL_PROJETOS].find({}).sort("prazo", 1).limit(top_k)]
+    employee_map = _get_employee_map() # Pega o mapa de funcionários
+    projects_raw = mongo()[COLL_PROJETOS].find({}).sort("prazo", 1).limit(top_k)
+    projects_clean = [sanitize_doc(p) for p in projects_raw]
+    # Enriquece cada projeto com o nome do responsável
+    return [_enrich_doc_with_responsavel(p, employee_map) for p in projects_clean]
+
 def list_all_tasks(top_k: int = 2000) -> List[Dict[str, Any]]:
-    return [sanitize_doc(x) for x in mongo()[COLL_TAREFAS].find({}).sort("prazo", 1).limit(top_k)]
+    employee_map = _get_employee_map() # Pega o mapa de funcionários
+    tasks_raw = mongo()[COLL_TAREFAS].find({}).sort("prazo", 1).limit(top_k)
+    tasks_clean = [sanitize_doc(t) for t in tasks_raw]
+    # Enriquece cada tarefa com o nome do responsável
+    return [_enrich_doc_with_responsavel(t, employee_map) for t in tasks_clean]
+
 def list_all_funcionarios(top_k: int = 500) -> List[Dict[str, Any]]:
+    # Esta função não precisa de enriquecimento, ela é a fonte
     return [sanitize_doc(x) for x in mongo()[COLL_FUNCIONARIOS].find({}).sort("nome", 1).limit(top_k)]
+
 def list_tasks_by_deadline_range(start: str, end: str, top_k: int = 50) -> List[Dict[str, Any]]:
-    return [sanitize_doc(x) for x in mongo()[COLL_TAREFAS].find({"prazo": {"$gte": start, "$lte": end}}).sort("prazo", 1).limit(top_k)]
+    employee_map = _get_employee_map() # Pega o mapa de funcionários
+    tasks_raw = mongo()[COLL_TAREFAS].find({"prazo": {"$gte": start, "$lte": end}}).sort("prazo", 1).limit(top_k)
+    tasks_clean = [sanitize_doc(t) for t in tasks_raw]
+    # Enriquece cada tarefa com o nome do responsável
+    return [_enrich_doc_with_responsavel(t, employee_map) for t in tasks_clean]
+
 def list_projects_by_status(status: str, top_k: int = 50) -> List[Dict[str, Any]]:
     status_norm = (status or "").strip().lower()
     if status_norm in {"em andamento", "andamento", "ativo", "em_progresso", "em progresso", "executando"}:
         rx = {"$regex": "(andament|progres|ativo|execut)", "$options": "i"}
     else:
-        rx = {"$regex": re.escape(status_norm), "$options": "i"}      
-    return [sanitize_doc(x) for x in mongo()[COLL_PROJETOS].find({"situacao": rx}).sort("prazo", 1).limit(top_k)]
+        rx = {"$regex": re.escape(status_norm), "$options": "i"}
+        
+    employee_map = _get_employee_map() # Pega o mapa de funcionários
+    projects_raw = mongo()[COLL_PROJETOS].find({"situacao": rx}).sort("prazo", 1).limit(top_k)
+    projects_clean = [sanitize_doc(p) for p in projects_raw]
+    # Enriquece cada projeto com o nome do responsável
+    return [_enrich_doc_with_responsavel(p, employee_map) for p in projects_clean]
+
 def upcoming_deadlines(days: int = 14, top_k: int = 50) -> List[Dict[str, Any]]:
     today_iso = iso_date(today()); limit_date = (today() + timedelta(days=days)).date().isoformat()
-    return [sanitize_doc(x) for x in mongo()[COLL_TAREFAS].find({"prazo": {"$gte": today_iso, "$lte": limit_date}}).sort("prazo", 1).limit(top_k)]
+    
+    employee_map = _get_employee_map() # Pega o mapa de funcionários
+    tasks_raw = mongo()[COLL_TAREFAS].find({"prazo": {"$gte": today_iso, "$lte": limit_date}}).sort("prazo", 1).limit(top_k)
+    tasks_clean = [sanitize_doc(t) for t in tasks_raw]
+    # Enriquece cada tarefa com o nome do responsável
+    return [_enrich_doc_with_responsavel(t, employee_map) for t in tasks_clean]
+
+# === FIM DAS FUNÇÕES DE FERRAMENTA ATUALIZADAS ===
+
+
 async def update_project(pid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
         auth_headers = await get_api_auth_headers(client, use_json=True)
