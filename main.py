@@ -335,15 +335,18 @@ def fetch_pdf_bytes(url: str):
         r = _try_download_traced(cand, TIMEOUT_S, PDF_USER_AGENT); last = r
         if r["status"] == 200 and _is_pdf(r["content_type"], r["content"]): return r["content"]
     raise ValueError(f"Não foi possível obter PDF (último status={last['status'] if last else None}, content-type={last['content_type'] if last else None}).")
+
 def clean_pdf_text(s: str) -> str:
     if not s: return s
     s = re.sub(r"[ \t]*\n[ \t]*", " ", s); s = re.sub(r"\s{2,}", " ", s)
     s = re.sub(r"\s+([,;\.\!\?\:\)])", r"\1", s); s = re.sub(r"([,;\.\!\?\:])([^\s])", r"\1 \2", s)
     return s.strip()
+
 def _anchor_regex_flex(label: str) -> re.Pattern:
     m = re.search(r"(?i)texto\.?(\d+)", label or "");
     if not m: return re.compile(r"(?!)")
     num = m.group(1); return re.compile(rf"(?i)\bTexto\.?{re.escape(num)}\.?\b[:\-]?\s*")
+
 def extract_after_anchor_from_pdf(pdf_bytes: bytes, anchor_label: str, max_chars: int = 4000) -> str:
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf: text_all = "\n".join((page.extract_text() or "") for page in pdf.pages)
     if not text_all.strip(): return ""
@@ -352,6 +355,7 @@ def extract_after_anchor_from_pdf(pdf_bytes: bytes, anchor_label: str, max_chars
     start = m.end(); next_m = re.search(r"(?i)\bTexto\.?\d+\.?\b", text_all[start:])
     end = start + next_m.start() if next_m else len(text_all)
     return text_all[start:end].strip()[:max_chars].strip()
+
 def xlsx_bytes_to_dataframe_preserving_hyperlinks(xlsx_bytes: bytes) -> pd.DataFrame:
     wb = load_workbook(io.BytesIO(xlsx_bytes), data_only=True, read_only=False); ws = wb.active
     headers: List[str] = [str(cell.value).strip() if cell.value is not None else "" for cell in next(ws.iter_rows(min_row=1, max_row=1, values_only=False))]
@@ -381,6 +385,34 @@ def xlsx_bytes_to_dataframe_preserving_hyperlinks(xlsx_bytes: bytes) -> pd.DataF
         rows.append(record)
     return pd.DataFrame(rows)
 
+def extract_full_pdf_text(pdf_bytes: bytes) -> str:
+    """
+    Extrai TODO o texto de todas as páginas de um PDF e o limpa.
+    """
+    try:
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            text_all = "\n".join((page.extract_text() or "") for page in pdf.pages if page.extract_text())
+        return clean_pdf_text(text_all)
+    except Exception as e:
+        print(f"Erro ao extrair texto completo do PDF: {e}")
+        return ""
+
+def extract_hidden_message(text: str) -> str:
+    """
+    Encontra letras maiúsculas "fora do lugar" para formar uma frase.
+    
+    Regra: Busca palavras que começam com minúscula, mas têm uma 
+    letra maiúscula no meio (ex: "palavraSecreta").
+    Isso evita siglas (PDF, API) e nomes próprios (Ache, Flavia).
+    """
+    if not text:
+        return ""
+    try:
+        letters = re.findall(r"\b[a-z]+([A-Z])[a-zA-Z]*\b", text)
+        return "".join(letters)
+    except Exception:
+        return "" 
+    
 # =========================
 # Auth (Falar com API Render)
 # (Omitido por brevidade)
@@ -1001,6 +1033,33 @@ async def import_project_from_url_tool(
         file_bytes=None
     )
 
+async def get_pdf_content_from_url_impl(url: str) -> str:
+    """
+    Puxa o texto completo de um PDF de uma URL.
+    Usado pela IA para "ler" um documento.
+    """
+    try:
+        pdf_bytes = fetch_pdf_bytes(url)
+        return extract_full_pdf_text(pdf_bytes)
+    except Exception as e:
+        return f"Erro ao processar PDF da URL: {str(e)}"
+
+async def solve_pdf_enigma_from_url_impl(url: str) -> str:
+    """
+    Puxa um PDF de uma URL e tenta resolver o enigma da "frase secreta".
+    """
+    try:
+        pdf_bytes = fetch_pdf_bytes(url)
+        full_text = extract_full_pdf_text(pdf_bytes)
+        if not full_text:
+            return "Não foi possível extrair texto do PDF."
+        
+        message = extract_hidden_message(full_text)
+        return message if message else "Nenhuma mensagem secreta encontrada."
+        
+    except Exception as e:
+        return f"Erro ao processar enigma do PDF: {str(e)}"
+
 def toolset() -> Tool:
     fns = [
         FunctionDeclaration(name="count_all_projects", description="Conta e retorna o número total de projetos.", parameters={"type": "object", "properties": {}}),
@@ -1023,6 +1082,8 @@ def toolset() -> Tool:
         FunctionDeclaration(name="find_project_responsavel", description="Encontra o nome do responsável por um projeto (busca por nome exato).", parameters={"type": "object", "properties": {"project_name": {"type": "string"}}, "required": ["project_name"]}),
         FunctionDeclaration(name="count_tasks_in_project", description="Conta o número de tarefas em um projeto (busca por nome exato).", parameters={"type": "object", "properties": {"project_name": {"type": "string"}}, "required": ["project_name"]}),
         FunctionDeclaration(name="list_tasks_by_project_name", description="Lista as N primeiras tarefas de um projeto (busca por nome exato).", parameters={"type": "object", "properties": {"project_name": {"type": "string"}, "top_k": {"type": "integer"}}, "required": ["project_name"]}),
+        FunctionDeclaration(name="get_pdf_content_from_url", description="Extrai e retorna todo o texto de um arquivo PDF hospedado em uma URL. Use isso para 'ler' ou 'analisar' um PDF.", parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
+        FunctionDeclaration(name="solve_pdf_enigma_from_url", description="Encontra uma 'frase secreta' escondida em um PDF (letras maiúsculas fora de lugar) a partir de uma URL.", parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
     ]
     return Tool(function_declarations=fns)
 
@@ -1048,6 +1109,8 @@ async def exec_tool(name: str, args: Dict[str, Any], user_id: Optional[str] = No
         if name == "create_task": return {"ok": True, "data": await create_task(args)}
         if name == "update_task": return {"ok": True, "data": await update_task(args["task_id"], args.get("patch", {}))}
         if name == "import_project_from_url": return {"ok": True, "data": await import_project_from_url_tool(**args, user_id=user_id)}
+        if name == "get_pdf_content_from_url": return {"ok": True, "data": await get_pdf_content_from_url_impl(args["url"])}
+        if name == "solve_pdf_enigma_from_url": return {"ok": True, "data": await solve_pdf_enigma_from_url_impl(args["url"])}
         return {"ok": False, "error": f"função desconhecida: {name}"}
     except Exception as e:
         detail = str(e)
@@ -1184,6 +1247,75 @@ async def tasks_from_xlsx(
         file_bytes=file_bytes       # Passa o arquivo (se houver)
     )
     return result
+
+@app.post("/ai/chat-with-pdf")
+async def ai_chat_with_pdf(
+    pergunta: str = Form(...),
+    file: UploadFile = File(...),
+    nome_usuario: Optional[str] = Form(None),
+    email_usuario: Optional[str] = Form(None),
+    id_usuario: Optional[str] = Form(None),
+    _ = Depends(require_api_key)
+):
+    """
+    Endpoint de chat que "lê" um PDF enviado e usa o conteúdo
+    como contexto para responder a pergunta do usuário.
+    """
+    try:
+        pdf_bytes = await file.read()
+        pdf_text = extract_full_pdf_text(pdf_bytes)
+        
+        if not pdf_text:
+            raise HTTPException(status_code=422, detail="Não foi possível extrair texto do PDF enviado.")
+
+        contexto_prompt = f"""
+        Use o CONTEÚDO DO DOCUMENTO abaixo para responder a PERGUNTA DO USUÁRIO.
+        Responda apenas com base no documento. Se a resposta não estiver no
+        documento, diga "Essa informação não está no documento fornecido."
+
+        ==================== CONTEÚDO DO DOCUMENTO ====================
+        {pdf_text[:15000]} 
+        ===============================================================
+
+        PERGUNTA DO USUÁRIO: {pergunta}
+        """
+        
+        out = await chat_with_tools(
+            user_msg=contexto_prompt, 
+            history=None, # Ignora o histórico para focar no PDF
+            nome_usuario=nome_usuario,
+            email_usuario=email_usuario, 
+            id_usuario=id_usuario        
+        )
+        
+        response_data = {
+            "tipo_resposta": "TEXTO_PDF",
+            "conteudo_texto": out.get("answer", "Desculpe, não consegui processar sua solicitação."),
+            "dados": out.get("tool_steps") # (geralmente vazio, mas mantido)
+        }
+        return JSONResponse(response_data)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao processar chat com PDF: {str(e)}")
+
+@app.post("/pdf/extract-text")
+async def pdf_extract_text(file: UploadFile = File(...), _ = Depends(require_api_key)):
+    """
+    Endpoint utilitário: Envie um PDF e receba o texto completo.
+    """
+    pdf_bytes = await file.read()
+    text = extract_full_pdf_text(pdf_bytes)
+    return {"filename": file.filename, "text": text}
+
+@app.post("/pdf/solve-enigma")
+async def pdf_solve_enigma(file: UploadFile = File(...), _ = Depends(require_api_key)):
+    """
+    Endpoint utilitário: Envie um PDF e receba a "frase secreta".
+    """
+    pdf_bytes = await file.read()
+    text = extract_full_pdf_text(pdf_bytes)
+    message = extract_hidden_message(text)
+    return {"filename": file.filename, "message": message or "Nenhuma mensagem encontrada."}
 
 @app.get("/")
 def root():
