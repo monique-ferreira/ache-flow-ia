@@ -63,7 +63,7 @@ TASKS_API_BASE           = os.getenv("TASKS_API_BASE", "https://ache-flow-back.o
 TASKS_API_PROJECTS_PATH  = os.getenv("TASKS_API_PROJECTS_PATH", "/projetos")
 TASKS_API_TASKS_PATH     = os.getenv("TASKS_API_TASKS_PATH", "/tarefas")
 # Token de admin (ou um token de usuário válido) para a rota de importação /tasks/from-xlsx
-ACHEFLOW_MAIN_API_TOKEN = os.getenv("ACHEFLOW_API_TOKEN") 
+ACHEFLOW_MAIN_API_TOKEN = os.getenv("ACHEFLOW_MAIN_API_TOKEN") 
 
 TIMEOUT_S = int(os.getenv("TIMEOUT_S", "90"))
 GENERIC_USER_AGENT = os.getenv("GENERIC_USER_AGENT", "ache-flow-ia/1.0 (+https://tistto.com.br)")
@@ -75,7 +75,7 @@ DEFAULT_TOP_K = 8
 # =========================
 # FastAPI App (Único)
 # =========================
-app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="2.0.8") # Versão API-Only Corrigida
+app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="2.0.9") # Versão API-Only Corrigida
 
 # === ADICIONADO BLOCO CORS ===
 origins = [
@@ -151,24 +151,16 @@ def pick(d: Dict[str, Any], keys: List[str]) -> Dict[str, Any]:
     return {k: d.get(k) for k in keys if k in d}
 
 def sanitize_doc(data: Any) -> Any:
-    # Se for um datetime ou date, converte para string
     if isinstance(data, (datetime, date)):
         return data.isoformat()
-    
-    # Se for um ObjectId, converte para string
     if isinstance(data, ObjectId):
         return str(data)
-    
-    # Se for um DBRef, converte para string (apenas o ID)
     if isinstance(data, DBRef):
         return str(data.id)
-    
     if isinstance(data, dict):
         return {k: sanitize_doc(v) for k, v in data.items()}
-    
     if isinstance(data, list):
         return [sanitize_doc(item) for item in data]
-    
     return data
 
 # === INÍCIO DAS NOVAS FUNÇÕES HELPER ===
@@ -196,7 +188,6 @@ def _enrich_doc_with_responsavel(doc: Dict[str, Any], employee_map: Dict[str, st
     """
     resp_obj = doc.get("responsavel", {})
     if isinstance(resp_obj, dict):
-        # A API do Render retorna um DBRef: { "id": "...", "collection": "..." }
         resp_id = str(resp_obj.get("id"))
     else:
         resp_id = None
@@ -821,7 +812,7 @@ async def chat_with_tools(
             role_from_frontend = h.sender
             gemini_role = "model" if role_from_frontend == "ai" else "user"
             text_content = h.content.conteudo_texto
-            contents.append(Content(role=gemini_role, parts=[Part.from_text(text_content)]))
+            contents.append(Content(role=gemim_role, parts=[Part.from_text(text_content)]))
     contents.append(Content(role="user", parts=[Part.from_text(user_msg)]))
     tools = [toolset()]
     tool_steps: List[Dict[str, Any]] = []
@@ -897,7 +888,9 @@ async def ai_chat(
 async def tasks_from_xlsx(
     authorization: Optional[str] = Header(None), # Recebe o token do usuário
     x_api_key: Optional[str] = Header(None), # Recebe a API Key
-    _=Depends(require_api_key), # Valida a x-api-key
+    # --- CORREÇÃO: Valida o x_api_key ---
+    _=Depends(require_api_key), 
+    # --- FIM DA CORREÇÃO ---
     projeto_id: Optional[str] = Form(None),
     projeto_nome: Optional[str] = Form(None),
     create_project_flag: int = Form(0),
@@ -909,38 +902,27 @@ async def tasks_from_xlsx(
     xlsx_url: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None)
 ):
-    # Esta rota é chamada pelo frontend (IAche/index.tsx)
-    # Precisamos do token do usuário para a lógica de 'resolve_responsavel_id'
-    
     if not authorization:
         raise HTTPException(status_code=401, detail="Token de autorização de usuário ausente")
-    token = authorization # Inclui "Bearer "
     
-    # --- CORREÇÃO: Precisamos extrair o user_id do token ---
-    # Esta é a parte mais complexa. A API do Render tem a lógica
-    # para decodificar o token. Este serviço de IA não tem.
-    # A SOLUÇÃO CORRETA é o frontend enviar o user_id no form-data.
-    # Mas, como não temos isso, vamos usar o token do ACHEFLOW_MAIN_API_TOKEN
-    # se o 'projeto_responsavel' for "eu".
-    
-    user_id_para_importacao = "id_generico" # Fallback
-    usando_token_de_servico = False
-    
-    if projeto_responsavel and projeto_responsavel.lower() in ["eu", "eu mesmo", "me", "para mim", "eu sou responsável", "sou eu"]:
-        if not ACHEFLOW_MAIN_API_TOKEN:
-             raise HTTPException(status_code=500, detail="ACHEFLOW_MAIN_API_TOKEN não está configurado. Não consigo resolver 'eu sou o responsável'.")
-        
-        # Se o responsável for "eu", usamos o token de admin
-        token_para_importacao = f"Bearer {ACHEFLOW_MAIN_API_TOKEN}"
-        
     token_para_importacao = authorization
-    user_id_para_importacao = "" # Não sabemos o ID do usuário
+    user_id_para_importacao = "user_id_desconhecido_na_importacao" # Fallback
 
     # Se um token de serviço (admin) estiver disponível, use-o.
     # Isso dá à importação mais privilégios.
     if ACHEFLOW_MAIN_API_TOKEN:
         token_para_importacao = f"Bearer {ACHEFLOW_MAIN_API_TOKEN}"
-        user_id_para_importacao = "service_account_admin" # ID Fixo
+        # Se o responsável for "eu", precisamos de um ID.
+        # Esta rota /tasks/from-xlsx NÃO recebe o user_id no form-data.
+        # A API do Render (create_project_api) vai usar o ID do token.
+        # Então, se o responsável for "eu", passamos "eu"
+        # e a função 'resolve_responsavel_id' vai usar o ID do token de serviço.
+        if projeto_responsavel and projeto_responsavel.lower() in ["eu", "eu mesmo", "me", "para mim", "eu sou responsável", "sou eu"]:
+             # O user_id aqui é um placeholder, pois o 'resolve_responsavel_id'
+             # vai usar o ID do ACHEFLOW_MAIN_API_TOKEN (o que é ideal)
+             user_id_para_importacao = "service_account_admin"
+        else:
+             user_id_para_importacao = "service_account_admin_guest"
 
     file_bytes = await file.read() if file else None
     result = await tasks_from_xlsx_logic(
@@ -958,6 +940,7 @@ async def tasks_from_xlsx(
         file_bytes=file_bytes
     )
     return result
+
 @app.get("/")
 def root():
     return {
