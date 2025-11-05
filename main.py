@@ -399,19 +399,53 @@ def extract_full_pdf_text(pdf_bytes: bytes) -> str:
 
 def extract_hidden_message(text: str) -> str:
     """
-    Encontra letras maiúsculas "fora do lugar" para formar uma frase.
+    Encontra palavras com letras maiúsculas "fora do lugar" e
+    extrai as letras maiúsculas de cada palavra, unindo-as com espaços
+    para formar a frase secreta.
     
-    Regra: Busca palavras que começam com minúscula, mas têm uma 
-    letra maiúscula no meio (ex: "palavraSecreta").
-    Isso evita siglas (PDF, API) e nomes próprios (Ache, Flavia).
+    Implementa duas regras de extração:
+    1.  Palavras "mixedCase" (ex: minhaFRASE): Extrai todas as maiúsculas (FRASE).
+    2.  Palavras "TitleCase" (ex: Você): Extrai a primeira maiúscula (V)
+        APENAS SE não for o início de uma frase (ex: não vem após ".").
     """
     if not text:
         return ""
-    try:
-        letters = re.findall(r"\b[a-z]+([A-Z])[a-zA-Z]*\b", text)
-        return "".join(letters)
-    except Exception:
-        return "" 
+    
+    secret_parts = []
+
+    words = text.split()
+    
+    sentence_enders = ".!?"
+
+    for i, word in enumerate(words):
+
+        clean_word = word.rstrip(f",;:.\"'{sentence_enders}")
+        if not clean_word or len(clean_word) < 1:
+            continue
+
+        if (
+            not clean_word.islower() and 
+            not clean_word.isupper() and 
+            not clean_word.istitle()
+        ):
+            caps = re.sub(r"[^A-Z]", "", clean_word)
+            if caps:
+                secret_parts.append(caps)
+            continue 
+
+        if clean_word.istitle():
+            if i == 0:
+                continue
+            
+            prev_word = words[i-1]
+            
+            if any(prev_word.endswith(ender) for ender in sentence_enders):
+                continue
+                
+            first_cap = clean_word[0]
+            secret_parts.append(first_cap)
+
+    return " ".join(secret_parts)
     
 # =========================
 # Auth (Falar com API Render)
