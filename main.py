@@ -404,25 +404,39 @@ async def get_api_auth_headers(client: httpx.AsyncClient, use_json: bool = True)
 class CreateTaskItem(BaseModel):
     titulo: str; descricao: Optional[str] = None; responsavel: Optional[str] = None
     deadline: Optional[str] = None; doc_ref: Optional[str] = None; prazo_data: Optional[str] = None
+
 async def create_project_api(client: httpx.AsyncClient, data: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{TASKS_API_BASE}{TASKS_API_PROJECTS_PATH}"
     auth_headers = await get_api_auth_headers(client, use_json=True)
     payload = pick(data, ["nome", "responsavel_id", "situacao", "prazo", "descricao", "categoria"])
+    
     r = await client.post(url, json=payload, headers=auth_headers, timeout=TIMEOUT_S)
-    r.raise_for_status()
+    
+    if r.status_code not in (200, 201):
+        raise httpx.HTTPStatusError(
+            f"Erro da API do Render: {r.status_code}", 
+            request=r.request, 
+            response=r
+        )
+    
     return r.json()
 
-# --- CORREÇÃO: Removido 'data_inicio' ---
 async def create_task_api(client: httpx.AsyncClient, data: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{TASKS_API_BASE}{TASKS_API_TASKS_PATH}"
     auth_headers = await get_api_auth_headers(client, use_json=True)
-    # A API de destino (Render) não aceita 'data_inicio', apenas 'prazo'
     payload = pick(data, ["nome", "projeto_id", "responsavel_id", "descricao", "prioridade", "status", "prazo", "documento_referencia", "concluido"])
     payload = {k: v for k, v in payload.items() if v is not None}
+    
     r = await client.post(url, json=payload, headers=auth_headers, timeout=TIMEOUT_S)
-    r.raise_for_status()
+    
+    if r.status_code not in (200, 201):
+        raise httpx.HTTPStatusError(
+            f"Erro da API do Render: {r.status_code}", 
+            request=r.request, 
+            response=r
+        )
+        
     return r.json()
-# --- FIM DA CORREÇÃO ---
 
 async def find_project_id_by_name(client: httpx.AsyncClient, projeto_nome: str) -> Optional[str]:
     url = f"{TASKS_API_BASE}{TASKS_API_PROJECTS_PATH}"
