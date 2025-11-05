@@ -983,7 +983,7 @@ async def import_project_from_url_tool(
 
     return await tasks_from_xlsx_logic(
         projeto_id=None, projeto_nome=projeto_nome,
-        user_id=None, # Import via tool usa o token padrão (ia-admin)
+        user_id=user_id,
         create_project_flag=1, projeto_situacao=projeto_situacao,
         projeto_prazo=prazo_formatado, projeto_responsavel=projeto_responsavel,
         projeto_descricao=projeto_descricao, projeto_categoria=projeto_categoria,
