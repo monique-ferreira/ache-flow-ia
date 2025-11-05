@@ -387,38 +387,38 @@ def xlsx_bytes_to_dataframe_preserving_hyperlinks(xlsx_bytes: bytes) -> pd.DataF
 
 def extract_full_pdf_text(pdf_bytes: bytes) -> str:
     """
-    Extrai TODO o texto de todas as páginas de um PDF e o limpa.
+    Extrai TODO o texto de todas as páginas de um PDF.
+    Retorna o texto bruto, preservando as quebras de linha originais.
     """
     try:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             text_all = "\n".join((page.extract_text() or "") for page in pdf.pages if page.extract_text())
-        return clean_pdf_text(text_all)
+        return text_all 
     except Exception as e:
         print(f"Erro ao extrair texto completo do PDF: {e}")
         return ""
-
-def extract_hidden_message(text: str) -> str:
+    
+def extract_hidden_message(raw_text: str) -> str:
     """
     Encontra palavras com letras maiúsculas "fora do lugar" e
     extrai as letras maiúsculas de cada palavra, unindo-as com espaços
     para formar a frase secreta.
     
-    Implementa duas regras de extração:
-    1.  Palavras "mixedCase" (ex: minhaFRASE): Extrai todas as maiúsculas (FRASE).
-    2.  Palavras "TitleCase" (ex: Você): Extrai a primeira maiúscula (V)
-        APENAS SE não for o início de uma frase (ex: não vem após ".").
+    Esta função processa o texto bruto para juntar palavras
+    quebradas por quebras de linha (ex: "contribuI\n ativamente").
     """
-    if not text:
+    if not raw_text:
         return ""
     
     secret_parts = []
-
-    words = text.split()
     
+    text = re.sub(r"([a-zA-Z])\s*\n\s*([a-zA-Z])", r"\1\2", raw_text)
+    text = re.sub(r"\s+", " ", text)
+    
+    words = text.split()
     sentence_enders = ".!?"
 
     for i, word in enumerate(words):
-
         clean_word = word.rstrip(f",;:.\"'{sentence_enders}")
         if not clean_word or len(clean_word) < 1:
             continue
@@ -1294,19 +1294,17 @@ async def ai_chat_with_pdf(
     """
     Endpoint de chat que "lê" um PDF enviado e usa o conteúdo
     como contexto para responder a pergunta do usuário.
-    
-    Este endpoint age como um mini-agente:
-    1. Extrai o texto completo (para RAG).
-    2. Pré-calcula a resposta do enigma (para a ferramenta).
-    3. Decide se usa a ferramenta (para enigmas) ou o RAG (para o resto).
     """
     try:
         pdf_bytes = await file.read()
         
-        pdf_text = extract_full_pdf_text(pdf_bytes)
-        hidden_message = extract_hidden_message(pdf_text)
+        raw_pdf_text = extract_full_pdf_text(pdf_bytes)
         
-        if not pdf_text:
+        hidden_message = extract_hidden_message(raw_pdf_text)
+        
+        rag_text = clean_pdf_text(raw_pdf_text)
+        
+        if not rag_text:
             raise HTTPException(status_code=422, detail="Não foi possível extrair texto do PDF enviado.")
 
         pdf_tools_list = [
@@ -1326,12 +1324,12 @@ async def ai_chat_with_pdf(
         - Para TODAS as outras perguntas (ex: 'quantos textos', 'qual o resumo'), responda APENAS com base no CONTEÚDO DO DOCUMENTO.
 
         ==================== CONTEÚDO DO DOCUMENTO ====================
-        {pdf_text[:10000]} 
+        {rag_text[:10000]} 
         ===============================================================
 
         PERGUNTA DO USUÁRIO: {pergunta}
         """
-        
+
         data_hoje, (inicio_mes, fim_mes) = iso_date(today()), month_bounds(today())
         nome_usuario_fmt = nome_usuario or "você"
         email_usuario_fmt = email_usuario or "email.desconhecido"
@@ -1379,7 +1377,7 @@ async def ai_chat_with_pdf(
 
     except Exception as e:
         raise e
-        
+            
 @app.post("/pdf/extract-text")
 async def pdf_extract_text(file: UploadFile = File(...), _ = Depends(require_api_key)):
     """
