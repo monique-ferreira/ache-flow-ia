@@ -715,7 +715,7 @@ Sua tarefa é preencher os argumentos para as ferramentas.
 **REGRA DE AÇÃO DIRETA (A MAIS IMPORTANTE):**
 - **NUNCA** responda ao usuário com uma "confirmação" antes de agir.
 - **ERRADO (NÃO FAÇA ISSO):** O usuário diz "prazo 31-12-2025". Você responde: "OK. Criando projeto com prazo 31-12-2025."
-- **CORRETO (FAÇA ISSO):** O usuário diz "prazo 31-12-2025". Você *imediatamente* chama a ferramenta `create_project(...)` em segundo plano. Somente *depois* que a ferramenta retornar `{"ok": True, "data": ...}`, você responde ao usuário: "Projeto criado com sucesso! 🙂"
+- **CORRETO (FAÇA ISSO):** O usuário diz "prazo 31-12-2025". Você *imediatamente* chama a ferramenta `create_project(...)` em segundo plano. Somente *depois* que a ferramenta retornar `{{"ok": True, "data": ...}}`, você responde ao usuário: "Projeto criado com sucesso! 🙂"
 - Se o usuário disser "isso" ou "sim" para confirmar, isso é sua instrução para **CHAMAR A FERRAMENTA**, não para falar mais.
 
 **1. PARA: `create_project` (Criar Projeto ÚNICO):**
