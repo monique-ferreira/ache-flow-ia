@@ -621,16 +621,15 @@ def list_tasks_by_deadline_range(start: str, end: str, top_k: int = 50) -> List[
     return [_enrich_doc_with_responsavel(t, employee_map) for t in tasks_clean]
 
 def list_projects_by_status(status: str, top_k: int = 50) -> List[Dict[str, Any]]:
-    status_norm = (status or "").strip().lower()
-    if status_norm in {"em andamento", "andamento", "ativo", "em_progresso", "em progresso", "executando"}:
-        rx = {"$regex": "(andament|progres|ativo|execut)", "$options": "i"}
-    else:
-        rx = {"$regex": re.escape(status_norm), "$options": "i"}
+    status_norm = (status or "").strip()
+    if not status_norm:
+        return []
+
+    rx = {"$regex": f"^{re.escape(status_norm)}$", "$options": "i"}
         
     employee_map = _get_employee_map() # Pega o mapa de funcionários
     projects_raw = mongo()[COLL_PROJETOS].find({"situacao": rx}).sort("prazo", 1).limit(top_k)
     projects_clean = [sanitize_doc(p) for p in projects_raw]
-    # Enriquece cada projeto com o nome do responsável
     return [_enrich_doc_with_responsavel(p, employee_map) for p in projects_clean]
 
 def upcoming_deadlines(days: int = 14, top_k: int = 50) -> List[Dict[str, Any]]:
@@ -650,20 +649,22 @@ def count_all_projects() -> int:
         print(f"Erro ao contar projetos: {e}")
         return -1
 
+# Em main.py, substitua a função de contagem por esta:
+
 def count_projects_by_status(status: str) -> int:
     """Conta projetos com base em um status (ex: 'em andamento')."""
-    status_norm = (status or "").strip().lower()
-    if status_norm in {"em andamento", "andamento", "ativo", "em_progresso", "em progresso", "executando"}:
-        rx = {"$regex": "(andament|progres|ativo|execut)", "$options": "i"}
-    else:
-        rx = {"$regex": re.escape(status_norm), "$options": "i"}
-        
+    status_norm = (status or "").strip()
+    if not status_norm:
+        return 0 # Retorna 0 se o status for vazio
+
     try:
+        rx = {"$regex": f"^{re.escape(status_norm)}$", "$options": "i"}
+        
         return mongo()[COLL_PROJETOS].count_documents({"situacao": rx})
     except Exception as e:
         print(f"Erro ao contar projetos por status: {e}")
         return -1
-
+    
 async def update_project(pid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
         auth_headers = await get_api_auth_headers(client, use_json=True)
