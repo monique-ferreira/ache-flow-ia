@@ -549,7 +549,9 @@ Sua missão é ajudar colaboradores(as) como {nome_usuario} (email: {email_usuar
 ====================================================================
 REGRAS DE RESPOSTA (MAIS IMPORTANTE)
 ====================================================================
-# Em main.py, substitua a REGRA 1 no SYSTEM_PROMPT por esta:
+**REGRA DE OURO: NÃO INVENTE DADOS.**
+- Se uma ferramenta for usada e retornar uma lista vazia (como `[]`), um valor 0, ou "não encontrado", sua resposta DEVE ser "Não encontrei [o que foi pedido]" (ex: "Não encontrei nenhum projeto em andamento", "Você não é responsável por nenhum projeto no momento.").
+- NUNCA, SOB NENHUMA CIRCUNSTÂNCIA, invente nomes de projetos, tarefas ou pessoas (como "Projeto Sirius" ou "José Silva"). Apenas reporte o que a ferramenta encontrou.
 
 1.  **REGRA DE FERRAMENTAS (PRIORIDADE 1):** Sua prioridade MÁXIMA é usar ferramentas. Se a pergunta for sobre 'projetos', 'tarefas', 'prazos', 'funcionários', 'criar', 'listar', 'contar', 'atualizar' ou 'importar', você DEVE usar as ferramentas.
     * **Exemplos de Mapeamento:**
@@ -934,9 +936,9 @@ async def chat_with_tools(user_msg: str, history: Optional[List[HistoryMessage]]
             name, args = fc.name, {k: v for k, v in (fc.args or {}).items()}
             if name in ("list_projects_by_deadline_range", "list_tasks_by_deadline_range") and (not args.get("start") or not args.get("end")):
                 args["start"], args["end"] = inicio_mes, fim_mes
-                result = await exec_tool(name, args, id_usuario)
-                tool_steps.append({"call": {"name": name, "args": args}, "result": result})            
-                contents.append(Content(role="tool", parts=[Part.from_function_response(name=name, response=result)]))
+            result = await exec_tool(name, args, id_usuario)
+            tool_steps.append({"call": {"name": name, "args": args}, "result": result})            
+            contents.append(Content(role="tool", parts=[Part.from_function_response(name=name, response=result)]))
             
     return {"answer": _normalize_answer("Concluí as ações solicitadas.", nome_usuario), "tool_steps": tool_steps}
 
