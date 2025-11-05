@@ -226,30 +226,35 @@ def _get_employee_map() -> Dict[str, str]:
         print(f"Erro ao buscar mapa de funcionários: {e}")
         return {}
 
+# Em main.py, substitua a função _enrich_doc_with_responsavel:
+
 def _enrich_doc_with_responsavel(doc: Dict[str, Any], employee_map: Dict[str, str]) -> Dict[str, Any]:
     """
-    Substitui 'responsavel_id' por 'responsavel_nome' em um projeto ou tarefa.
+    Substitui 'responsavel' (que é um ID sanitizado) por 'responsavel_nome'.
     """
-    # Garante que o ID seja uma string (pode vir de um ObjectId ou DBRef sanitizado)
-    resp_id = str(doc.get("responsavel_id")) 
+    resp_id_key = None
+    if "responsavel" in doc:
+        resp_id_key = "responsavel"
+    elif "responsavel_id" in doc:
+        resp_id_key = "responsavel_id"
+    else:
+        doc["responsavel_nome"] = "(Responsável não atribuído)"
+        return doc
+
+    resp_id = str(doc.get(resp_id_key)) 
     
     if resp_id and resp_id != "None":
         if resp_id in employee_map:
-            # Sucesso: Encontrou o nome
             doc["responsavel_nome"] = employee_map[resp_id]
         else:
-            # Falha: O ID existe mas não foi encontrado no mapa
             doc["responsavel_nome"] = f"(ID não encontrado: {resp_id})"
     else:
-        # O projeto não tem responsável
-        doc["responsavel_nome"] = "(Nenhum responsável)"
+        doc["responsavel_nome"] = "(Responsável não atribuído)"
 
-    # Remove o ID para não confundir a IA
-    if "responsavel_id" in doc:
-        del doc["responsavel_id"]
+    if resp_id_key in doc:
+        del doc[resp_id_key]
         
     return doc
-
 # === FIM DAS NOVAS FUNÇÕES HELPER ===
 
 # =========================
@@ -549,6 +554,8 @@ REGRAS DE RESPOSTA (MAIS IMPORTANTE)
 1.  **REGRA DE FERRAMENTAS (PRIORIDADE 1):** Sua prioridade MÁXIMA é usar ferramentas. Se a pergunta for sobre 'projetos', 'tarefas', 'prazos', 'funcionários', 'criar', 'listar', 'contar', 'atualizar' ou 'importar', você DEVE usar as ferramentas.
     * **Exemplos de Mapeamento:**
         * "quantos projetos?" -> `count_all_projects`
+        * "quantos projetos eu sou responsável?" or "quantos projetos meus?" -> `count_my_projects`
+        * "liste meus projetos" -> `list_my_projects`
         * "quantos projetos em andamento?" -> `count_projects_by_status('em andamento')`
         * "liste as tarefas concluídas" -> `list_tasks_by_status('concluída')`
         * "quantas tarefas não iniciadas?" -> `count_tasks_by_status('não iniciada')`
@@ -765,10 +772,41 @@ def count_tasks_in_project(project_name: str) -> int:
 
         project_id = proj.get("_id")
         
-        return mongo()[COLL_TAREFAS].count_documents({"projeto_id": project_id})
+        task_query = {"projeto": DBRef(collection=COLL_PROJETOS, id=project_id)}
+        
+        return mongo()[COLL_TAREFAS].count_documents(task_query)
     except Exception as e:
         print(f"Erro ao contar tarefas no projeto: {e}")
         return -3
+
+def count_projects_by_responsavel(responsavel_id_str: Optional[str]) -> int:
+    """Conta projetos de um responsável específico pelo ID."""
+    if not responsavel_id_str:
+        return -1
+    try:
+        resp_oid = to_oid(responsavel_id_str)
+        query = {"responsavel": DBRef(collection=COLL_FUNCIONARIOS, id=resp_oid)}
+        return mongo()[COLL_PROJETOS].count_documents(query)
+    except Exception as e:
+        print(f"Erro ao contar projetos por responsável: {e}")
+        return -2
+
+def list_projects_by_responsavel(responsavel_id_str: Optional[str], top_k: int = 50) -> List[Dict[str, Any]]:
+    """Lista projetos de um responsável específico pelo ID."""
+    if not responsavel_id_str:
+        return []
+    try:
+        resp_oid = to_oid(responsavel_id_str)
+        query = {"responsavel": DBRef(collection=COLL_FUNCIONARIOS, id=resp_oid)}
+        
+        employee_map = _get_employee_map()
+        projects_raw = mongo()[COLL_PROJETOS].find(query).sort("prazo", 1).limit(top_k)
+        projects_clean = [sanitize_doc(p) for p in projects_raw]
+        return [_enrich_doc_with_responsavel(p, employee_map) for p in projects_clean]
+    except Exception as e:
+        print(f"Erro ao listar projetos por responsável: {e}")
+        return []
+
 async def import_project_from_url_tool(
     xlsx_url: str, 
     projeto_nome: str, 
@@ -795,6 +833,8 @@ def toolset() -> Tool:
         FunctionDeclaration(name="list_tasks_by_deadline_range", description="Lista tarefas com prazo entre datas (YYYY-MM-DD).", parameters={"type": "object", "properties": {"start": {"type": "string"}, "end": {"type": "string"}}, "required": ["start", "end"]}),
         FunctionDeclaration(name="upcoming_deadlines", description="Lista tarefas com prazo vencendo nos próximos X dias.", parameters={"type": "object", "properties": {"days": {"type": "integer"}}, "required": ["days"]}),
         FunctionDeclaration(name="list_projects_by_status", description="Lista projetos por status (ex: 'em andamento').", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
+        FunctionDeclaration(name="count_my_projects", description="Conta quantos projetos são de responsabilidade do usuário ATUAL.", parameters={"type": "object", "properties": {}}),
+        FunctionDeclaration(name="list_my_projects", description="Lista os projetos de responsabilidade do usuário ATUAL.", parameters={"type": "object", "properties": {}}),
         FunctionDeclaration(name="update_project", description="Atualiza campos de um projeto.", parameters={"type": "object", "properties": {"project_id": {"type": "string"}, "patch": {"type": "object", "properties": {"nome": {"type": "string"}, "situacao": {"type": "string"}, "prazo": {"type": "string"}}}}, "required": ["project_id", "patch"]}),
         FunctionDeclaration(name="create_project", description="Cria um novo projeto.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "responsavel": {"type": "string"}, "situacao": {"type": "string"}, "prazo": {"type": "string"}}, "required": ["nome", "responsavel", "situacao", "prazo"]}),
         FunctionDeclaration(name="create_task", description="Cria uma nova tarefa.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "projeto_id": {"type": "string"}, "responsavel_id": {"type": "string"}, "data_fim": {"type": "string"}, "data_inicio": {"type": "string"}, "status": {"type": "string"}}, "required": ["nome", "projeto_id", "responsavel_id", "data_fim", "data_inicio", "status"]}),
@@ -807,7 +847,7 @@ def toolset() -> Tool:
     ]
     return Tool(function_declarations=fns)
 
-async def exec_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+async def exec_tool(name: str, args: Dict[str, Any], user_id: Optional[str] = None) -> Dict[str, Any]:
     try:
         if name == "count_all_projects": return {"ok": True, "data": count_all_projects()}
         if name == "count_projects_by_status": return {"ok": True, "data": count_projects_by_status(args["status"])}
@@ -816,6 +856,8 @@ async def exec_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         if name == "list_all_funcionarios": return {"ok": True, "data": list_all_funcionarios(args.get("top_k", 500))}
         if name == "list_tasks_by_deadline_range": return {"ok": True, "data": list_tasks_by_deadline_range(args["start"], args["end"], args.get("top_k", 50))}
         if name == "upcoming_deadlines": return {"ok": True, "data": upcoming_deadlines(args.get("days", 14), args.get("top_k", 50))}
+        if name == "count_my_projects": return {"ok": True, "data": count_projects_by_responsavel(user_id)}
+        if name == "list_my_projects": return {"ok": True, "data": list_projects_by_responsavel(user_id, args.get("top_k", 50))}
         if name == "list_projects_by_status": return {"ok": True, "data": list_projects_by_status(args["status"], args.get("top_k", 50))}
         if name == "list_tasks_by_status": return {"ok": True, "data": list_tasks_by_status(args["status"], args.get("top_k", 50))}
         if name == "count_tasks_by_status": return {"ok": True, "data": count_tasks_by_status(args["status"])}
@@ -844,8 +886,8 @@ def _normalize_answer(raw: str, nome_usuario: str) -> str:
 def init_model(system_instruction: str) -> GenerativeModel:
     vertex_init(project=PROJECT_ID, location=LOCATION) 
     return GenerativeModel(GEMINI_MODEL_ID, system_instruction=system_instruction)
+
 async def chat_with_tools(user_msg: str, history: Optional[List[HistoryMessage]] = None, nome_usuario: Optional[str] = None, email_usuario: Optional[str] = None, id_usuario: Optional[str] = None) -> Dict[str, Any]:
-    # --- BUG CORRIGIDO AQUI ---
     data_hoje, (inicio_mes, fim_mes) = iso_date(today()), month_bounds(today())
     nome_usuario = nome_usuario or "você"
     email_usuario = email_usuario or "email.desconhecido"
@@ -870,9 +912,6 @@ async def chat_with_tools(user_msg: str, history: Optional[List[HistoryMessage]]
     for step in range(MAX_TOOL_STEPS):
         resp = model.generate_content(contents, tools=tools)
         calls = []
-        # --- INÍCIO DA CORREÇÃO ---
-        # Precisamos capturar a resposta completa do modelo (que contém o FunctionCall)
-        # para adicioná-la ao histórico.
         model_response_content = None
         if resp.candidates and resp.candidates[0].content:
             model_response_content = resp.candidates[0].content
@@ -880,34 +919,27 @@ async def chat_with_tools(user_msg: str, history: Optional[List[HistoryMessage]]
                 for part in model_response_content.parts:
                     if getattr(part, "function_call", None): 
                         calls.append(part.function_call)
-        # --- FIM DA CORREÇÃO ---
 
         if not calls:
-            # Se não há chamadas de função, é a resposta final.
             final_text = ""
             if resp.candidates and resp.candidates[0].content and resp.candidates[0].content.parts:
                 final_text = getattr(resp.candidates[0].content.parts[0], "text", "") or ""
             final_text = re.sub(r"(?i)(aguarde( um instante)?|só um momento|apenas um instante)[^\n]*", "", final_text).strip()
             return {"answer": _normalize_answer(final_text, nome_usuario), "tool_steps": tool_steps}
 
-        # --- INÍCIO DA CORREÇÃO ---
-        # Adiciona a resposta do modelo (o "FunctionCall") ao histórico
-        # ANTES de adicionar os resultados da ferramenta.
         if model_response_content:
             contents.append(model_response_content) 
-        # --- FIM DA CORREÇÃO ---
             
         for fc in calls:
             name, args = fc.name, {k: v for k, v in (fc.args or {}).items()}
             if name in ("list_projects_by_deadline_range", "list_tasks_by_deadline_range") and (not args.get("start") or not args.get("end")):
                 args["start"], args["end"] = inicio_mes, fim_mes
-            result = await exec_tool(name, args)
-            tool_steps.append({"call": {"name": name, "args": args}, "result": result})
-            
-            # Adiciona o resultado da ferramenta ao histórico
+                result = await exec_tool(name, args, id_usuario)
+                tool_steps.append({"call": {"name": name, "args": args}, "result": result})            
             contents.append(Content(role="tool", parts=[Part.from_function_response(name=name, response=result)]))
             
     return {"answer": _normalize_answer("Concluí as ações solicitadas.", nome_usuario), "tool_steps": tool_steps}
+
 # =========================
 # Rotas FastAPI
 # =========================
