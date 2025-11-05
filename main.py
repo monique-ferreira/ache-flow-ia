@@ -1451,4 +1451,3 @@ def root():
         "location": LOCATION,
         "main_api_target": TASKS_API_BASE,
     }
-}
