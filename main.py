@@ -61,12 +61,13 @@ APPLICATION_NAME = os.getenv("GOOGLE_CLOUD_APLICATION", "ai-service")
 GEMINI_MODEL_ID = os.getenv("GEMINI_MODEL_ID", "gemini-2.0-flash")
 
 API_KEY = os.getenv("API_KEY") 
-# --- REMOVIDO: NÃO VAMOS MAIS USAR MONGO DIRETAMENTE ---
-# MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/acheflow")
-# COLL_PROJETOS = os.getenv("MONGO_COLL_PROJETOS", "projetos")
-# COLL_TAREFAS = os.getenv("MONGO_COLL_TAREFAS", "tarefas")
-# COLL_FUNCIONARIOS = os.getenv("MONGO_COLL_FUNCIONARIOS", "funcionarios")
-# --- FIM DA REMOÇÃO ---
+
+# --- CORREÇÃO: REATIVANDO O MONGO PARA LEITURA ---
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/acheflow")
+COLL_PROJETOS = os.getenv("MONGO_COLL_PROJETOS", "projetos")
+COLL_TAREFAS = os.getenv("MONGO_COLL_TAREFAS", "tarefas")
+COLL_FUNCIONARIOS = os.getenv("MONGO_COLL_FUNCIONARIOS", "funcionarios")
+# --- FIM DA CORREÇÃO ---
 
 TASKS_API_BASE           = os.getenv("TASKS_API_BASE", "https://ache-flow-back.onrender.com").rstrip("/")
 TASKS_API_PROJECTS_PATH  = os.getenv("TASKS_API_PROJECTS_PATH", "/projetos")
@@ -86,7 +87,7 @@ DEFAULT_TOP_K = 8
 # =========================
 # FastAPI App (Único)
 # =========================
-app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="2.0.4") # Versão
+app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="2.0.5") # Versão
 
 # === ADICIONADO BLOCO CORS ===
 # Lista de domínios que podem acessar sua API
@@ -189,20 +190,34 @@ def sanitize_doc(data: Any) -> Any:
     # Se for qualquer outro tipo (int, str, bool, None), retorna como está
     return data
 
-# --- REMOVIDA: NÃO VAMOS MAIS USAR MONGO DIRETAMENTE ---
-# def mongo():
-# ...
-# --- FIM DA REMOÇÃO ---
+# --- CORREÇÃO: ADICIONANDO A FUNÇÃO MONGO() DE VOLTA ---
+def mongo():
+    if not MONGO_URI: 
+        raise RuntimeError("MONGO_URI não foi definida")
+    client = MongoClient(MONGO_URI)
+    try:
+        # get_default_database() PEGA O DB DA PRÓPRIA URI.
+        # Ex: ...mongodb.net/acheflow_db? -> usa 'acheflow_db'
+        db = client.get_default_database()
+        
+        # Forçamos uma checagem de conexão para garantir que a URI
+        # e as regras de Firewall do Atlas estão corretas.
+        db.command("ping") 
+        return db
+    except Exception as e:
+        # Se falhar, é provável que a URI esteja errada ou o IP do Cloud Run não esteja liberado
+        raise RuntimeError(f"Não foi possível conectar ao MongoDB. Verifique a MONGO_URI e o firewall do Atlas. Erro: {e}")
+# --- FIM DA CORREÇÃO ---
 
 # === INÍCIO DAS NOVAS FUNÇÕES HELPER ===
 
-async def _get_employee_map(client: httpx.AsyncClient) -> Dict[str, str]:
+async def _get_employee_map() -> Dict[str, str]:
     """
-    Helper para buscar todos os funcionários PELA API e criar um mapa de 
+    Helper para buscar todos os funcionários (via MONGO) e criar um mapa de 
     { "id_do_funcionario": "Nome Sobrenome" }.
     """
     try:
-        employees = await list_funcionarios(client) # Chama a nova função de API
+        employees = await list_funcionarios() # Chama a função de MONGO
         
         return {
             str(emp.get("_id")): f"{emp.get('nome', '')} {emp.get('sobrenome', '')}".strip()
@@ -210,19 +225,15 @@ async def _get_employee_map(client: httpx.AsyncClient) -> Dict[str, str]:
             if emp.get("_id")
         }
     except Exception as e:
-        print(f"Erro ao buscar mapa de funcionários pela API: {e}")
+        print(f"Erro ao buscar mapa de funcionários pelo Mongo: {e}")
         return {}
 
 def _enrich_doc_with_responsavel(doc: Dict[str, Any], employee_map: Dict[str, str]) -> Dict[str, Any]:
     """
-    Substitui 'responsavel' (objeto) por 'responsavel_nome' (string).
+    Substitui 'responsavel_id' (de um doc do Mongo) por 'responsavel_nome' (string).
     """
-    # --- CORREÇÃO: Lendo o ID de dentro do objeto 'responsavel' ---
-    resp_obj = doc.get("responsavel", {})
-    if isinstance(resp_obj, dict):
-        resp_id = str(resp_obj.get("id"))
-    else:
-        resp_id = None
+    # --- CORREÇÃO: Lendo 'responsavel_id' (vem do sanitize_doc) ---
+    resp_id = str(doc.get("responsavel_id")) 
     # --- FIM DA CORREÇÃO ---
     
     if resp_id and resp_id != "None":
@@ -236,10 +247,8 @@ def _enrich_doc_with_responsavel(doc: Dict[str, Any], employee_map: Dict[str, st
         # O projeto não tem responsável
         doc["responsavel_nome"] = "(Nenhum responsável)"
 
-    # Remove o objeto original para não confundir a IA
-    if "responsavel" in doc:
-        del doc["responsavel"]
-    if "responsavel_id" in doc: # Limpa o antigo também, por via das dúvidas
+    # Remove o id original para não confundir a IA
+    if "responsavel_id" in doc: 
         del doc["responsavel_id"]
         
     return doc
@@ -402,44 +411,36 @@ async def create_task_api(client: httpx.AsyncClient, data: Dict[str, Any]) -> Di
 # --- FIM DAS FUNÇÕES CORRETAS ---
 
 
-# --- INÍCIO DA REESCRITA DAS FUNÇÕES (AGORA USAM API) ---
-async def find_project_id_by_name(client: httpx.AsyncClient, projeto_nome: str) -> Optional[str]:
-    """Busca o ID de um projeto pelo nome, usando a API."""
-    url = f"{TASKS_API_BASE}{TASKS_API_PROJECTS_PATH}"
-    auth_headers = await get_api_auth_headers(client, use_json=True)
-    r = await client.get(url, headers=auth_headers, timeout=TIMEOUT_S)
-    if r.status_code != 200: 
-        return None
+# --- INÍCIO DA REESCRITA DAS FUNÇÕES (AGORA USAM MONGO) ---
+async def find_project_id_by_name(projeto_nome: str) -> Optional[str]:
+    """Busca o ID de um projeto pelo nome, usando MONGO."""
     try:
-        items = r.json()
-        if isinstance(items, list):
-            hit = next((p for p in items if str(p.get("nome")).strip().lower() == projeto_nome.strip().lower()), None)
-            return (hit or {}).get("_id") if hit else None
+        hit = mongo()[COLL_PROJETOS].find_one(
+            {"nome": re.compile(f"^{re.escape(projeto_nome)}$", re.IGNORECASE)},
+            {"_id": 1}
+        )
+        return str(hit["_id"]) if hit else None
     except Exception: 
         return None
-    return None
 
-async def list_funcionarios(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
-    """Lista todos os funcionários, usando a API."""
-    url = f"{TASKS_API_BASE}/funcionarios"
-    auth_headers = await get_api_auth_headers(client, use_json=True)
-    r = await client.get(url, headers=auth_headers, timeout=TIMEOUT_S)
-    if r.status_code != 200: 
-        return []
+async def list_funcionarios() -> List[Dict[str, Any]]:
+    """Lista todos os funcionários, usando MONGO."""
     try: 
-        return r.json() if isinstance(r.json(), list) else []
+        funcionarios_raw = mongo()[COLL_FUNCIONARIOS].find({}, {"nome": 1, "sobrenome": 1, "_id": 1, "email": 1})
+        return [sanitize_doc(f) for f in funcionarios_raw]
     except Exception: 
         return []
 # --- FIM DA REESCRITA ---
 
-async def resolve_responsavel_id(client: httpx.AsyncClient, nome_ou_email: Optional[str]) -> Optional[str]:
+async def resolve_responsavel_id(nome_ou_email: Optional[str]) -> Optional[str]:
+    """Resolve o ID do responsável usando MONGO."""
     nome_ou_email = (nome_ou_email or "").strip()
     # Se o nome for "eu", "eu mesmo", "para mim", etc., usa o ID do cache (usuário logado)
     if not nome_ou_email or nome_ou_email.lower() in ["eu", "eu mesmo", "me", "para mim", "eu sou responsável", "sou eu"]: 
         return _token_cache.get("user_id")
     
-    # --- CORREÇÃO: AGORA CHAMA A FUNÇÃO DE API ---
-    pessoas = await list_funcionarios(client)
+    # --- CORREÇÃO: AGORA CHAMA A FUNÇÃO DE MONGO ---
+    pessoas = await list_funcionarios()
     # --- FIM DA CORREÇÃO ---
     
     key = nome_ou_email.lower()
@@ -527,14 +528,22 @@ async def tasks_from_xlsx_logic(
         raise HTTPException(status_code=400, detail={"erro": "Para importar, forneça 'projeto_id' ou 'projeto_nome'."})
     async with httpx.AsyncClient() as client:
         resolved_project_id: Optional[str] = projeto_id
+        
+        # --- CORREÇÃO: USA O 'find_project_id_by_name' DE MONGO ---
         if not resolved_project_id and projeto_nome:
-            resolved_project_id = await find_project_id_by_name(client, projeto_nome)
+            resolved_project_id = await find_project_id_by_name(projeto_nome)
+        # --- FIM DA CORREÇÃO ---
+
         if not resolved_project_id:
             if create_project_flag and projeto_nome:
-                proj_resp_id = await resolve_responsavel_id(client, projeto_responsavel)
+                # --- CORREÇÃO: USA O 'resolve_responsavel_id' DE MONGO ---
+                proj_resp_id = await resolve_responsavel_id(projeto_responsavel)
+                # --- FIM DA CORREÇÃO ---
                 proj_prazo = (projeto_prazo or "").strip()
                 if not proj_prazo:
                     proj_prazo = (latest_task_date or (today_date + timedelta(days=30))).isoformat()
+                
+                # A CRIAÇÃO AINDA USA A API (httpx)
                 proj = await create_project_api(client, {
                     "nome": projeto_nome, "responsavel_id": proj_resp_id,
                     "situacao": (projeto_situacao or "Em planejamento").strip(),
@@ -545,8 +554,11 @@ async def tasks_from_xlsx_logic(
                 raise HTTPException(status_code=404, detail={"erro": f"Projeto '{projeto_nome}' não encontrado. Para criar, envie 'create_project_flag=1'."})
         created, errors = [], []
         for item in preview:
-            resp_id = await resolve_responsavel_id(client, item.get("responsavel"))
+            # --- CORREÇÃO: USA O 'resolve_responsavel_id' DE MONGO ---
+            resp_id = await resolve_responsavel_id(item.get("responsavel"))
+            # --- FIM DA CORREÇÃO ---
             try:
+                # A CRIAÇÃO AINDA USA A API (httpx)
                 created.append(await create_task_api(client, {
                     "nome": item["titulo"], "descricao": item["descricao"],
                     "projeto_id": resolved_project_id, "responsavel_id": resp_id,
@@ -622,52 +634,36 @@ INTERPRETAÇÃO DE DATAS (BASE)
 """ # --- CONTEXTO DO USUÁRIO REMOVIDO, POIS AGORA É TRATADO PELO CÓDIGO ---
 
 
-# === INÍCIO DAS FUNÇÕES DE FERRAMENTA ATUALIZADAS (USANDO API) ===
+# === INÍCIO DAS FUNÇÕES DE FERRAMENTA ATUALIZADAS (USANDO MONGO) ===
 
-async def list_all_projects(client: httpx.AsyncClient, top_k: int = 500) -> List[Dict[str, Any]]:
-    """Lista todos os projetos via API."""
-    url = f"{TASKS_API_BASE}{TASKS_API_PROJECTS_PATH}"
-    auth_headers = await get_api_auth_headers(client, use_json=True)
-    r = await client.get(url, headers=auth_headers, timeout=TIMEOUT_S)
-    r.raise_for_status()
-    projects_raw = r.json()
-    
-    employee_map = await _get_employee_map(client)
+async def list_all_projects(top_k: int = 500) -> List[Dict[str, Any]]:
+    """Lista todos os projetos via MONGO."""
+    employee_map = await _get_employee_map()
+    projects_raw = mongo()[COLL_PROJETOS].find({}).sort("prazo", 1).limit(top_k)
     projects_clean = [sanitize_doc(p) for p in projects_raw]
-    return [_enrich_doc_with_responsavel(p, employee_map) for p in projects_clean][:top_k]
+    return [_enrich_doc_with_responsavel(p, employee_map) for p in projects_clean]
 
-async def list_all_tasks(client: httpx.AsyncClient, top_k: int = 2000) -> List[Dict[str, Any]]:
-    """Lista todas as tarefas via API."""
-    url = f"{TASKS_API_BASE}{TASKS_API_TASKS_PATH}"
-    auth_headers = await get_api_auth_headers(client, use_json=True)
-    r = await client.get(url, headers=auth_headers, timeout=TIMEOUT_S)
-    r.raise_for_status()
-    tasks_raw = r.json()
-    
-    employee_map = await _get_employee_map(client)
+async def list_all_tasks(top_k: int = 2000) -> List[Dict[str, Any]]:
+    """Lista todas as tarefas via MONGO."""
+    employee_map = await _get_employee_map()
+    tasks_raw = mongo()[COLL_TAREFAS].find({}).sort("prazo", 1).limit(top_k)
     tasks_clean = [sanitize_doc(t) for t in tasks_raw]
-    return [_enrich_doc_with_responsavel(t, employee_map) for t in tasks_clean][:top_k]
+    return [_enrich_doc_with_responsavel(t, employee_map) for t in tasks_clean]
 
-async def list_all_funcionarios(client: httpx.AsyncClient, top_k: int = 500) -> List[Dict[str, Any]]:
-    """Lista todos os funcionários via API (implementação real)."""
-    funcionarios = await list_funcionarios(client) # Chama a função de API
+async def list_all_funcionarios(top_k: int = 500) -> List[Dict[str, Any]]:
+    """Lista todos os funcionários via MONGO (implementação real)."""
+    funcionarios = await list_funcionarios()
     return [sanitize_doc(f) for f in funcionarios][:top_k]
 
-async def list_tasks_by_deadline_range(client: httpx.AsyncClient, start: str, end: str, top_k: int = 50) -> List[Dict[str, Any]]:
-    """Lista tarefas por prazo via API (filtrando no Python)."""
-    all_tasks = await list_all_tasks(client, top_k=2000) # Busca todas
-    
-    # Filtra no python
-    filtered_tasks = [
-        t for t in all_tasks 
-        if t.get("prazo") and start <= t["prazo"] <= end
-    ]
-    return filtered_tasks[:top_k]
+async def list_tasks_by_deadline_range(start: str, end: str, top_k: int = 50) -> List[Dict[str, Any]]:
+    """Lista tarefas por prazo via MONGO."""
+    employee_map = await _get_employee_map()
+    tasks_raw = mongo()[COLL_TAREFAS].find({"prazo": {"$gte": start, "$lte": end}}).sort("prazo", 1).limit(top_k)
+    tasks_clean = [sanitize_doc(t) for t in tasks_raw]
+    return [_enrich_doc_with_responsavel(t, employee_map) for t in tasks_clean]
 
-async def list_projects_by_status(client: httpx.AsyncClient, status: str, top_k: int = 50) -> List[Dict[str, Any]]:
-    """Lista projetos por status via API (filtrando no Python)."""
-    all_projects = await list_all_projects(client, top_k=2000) # Busca todos
-    
+async def list_projects_by_status(status: str, top_k: int = 50) -> List[Dict[str, Any]]:
+    """Lista projetos por status via MONGO."""
     status_norm = (status or "").strip().lower()
     # --- REGEX ATUALIZADO ---
     if status_norm in {"em andamento", "andamento", "ativo", "em_progresso", "em progresso", "executando", "desenvolvimento"}:
@@ -675,48 +671,47 @@ async def list_projects_by_status(client: httpx.AsyncClient, status: str, top_k:
     else:
         rx = re.compile(re.escape(status_norm), re.IGNORECASE)
     
-    # Filtra no python
-    filtered_projects = [
-        p for p in all_projects
-        if p.get("situacao") and rx.search(p["situacao"])
-    ]
-    
-    employee_map = await _get_employee_map(client)
-    return [_enrich_doc_with_responsavel(p, employee_map) for p in filtered_projects][:top_k]
+    employee_map = await _get_employee_map()
+    projects_raw = mongo()[COLL_PROJETOS].find({"situacao": rx}).sort("prazo", 1).limit(top_k)
+    projects_clean = [sanitize_doc(p) for p in projects_raw]
+    return [_enrich_doc_with_responsavel(p, employee_map) for p in projects_clean]
 
-async def upcoming_deadlines(client: httpx.AsyncClient, days: int = 14, top_k: int = 50) -> List[Dict[str, Any]]:
-    """Lista prazos futuros via API (filtrando no Python)."""
+async def upcoming_deadlines(days: int = 14, top_k: int = 50) -> List[Dict[str, Any]]:
+    """Lista prazos futuros via MONGO."""
     today_iso = iso_date(today())
     limit_date = (today() + timedelta(days=days)).date().isoformat()
     
-    all_tasks = await list_all_tasks(client, top_k=2000) # Busca todas
-    
-    # Filtra no python
-    filtered_tasks = [
-        t for t in all_tasks 
-        if t.get("prazo") and today_iso <= t["prazo"] <= limit_date
-    ]
-    return filtered_tasks[:top_k]
+    employee_map = await _get_employee_map()
+    tasks_raw = mongo()[COLL_TAREFAS].find({"prazo": {"$gte": today_iso, "$lte": limit_date}}).sort("prazo", 1).limit(top_k)
+    tasks_clean = [sanitize_doc(t) for t in tasks_raw]
+    return [_enrich_doc_with_responsavel(t, employee_map) for t in tasks_clean]
 
-async def count_all_projects(client: httpx.AsyncClient) -> int:
-    """Conta todos os projetos via API."""
+async def count_all_projects() -> int:
+    """Conta todos os projetos via MONGO."""
     try:
-        projects = await list_all_projects(client, top_k=5000)
-        return len(projects)
+        return len(list(mongo()[COLL_PROJETOS].find({}, {"_id": 1})))
     except Exception as e:
         print(f"Erro ao contar projetos: {e}")
         return -1
 
-async def count_projects_by_status(client: httpx.AsyncClient, status: str) -> int:
-    """Conta projetos por status via API."""
+async def count_projects_by_status(status: str) -> int:
+    """Conta projetos por status via MONGO."""
+    status_norm = (status or "").strip().lower()
+    if status_norm in {"em andamento", "andamento", "ativo", "em_progresso", "em progresso", "executando", "desenvolvimento"}:
+        rx = re.compile(r"(andament|progres|ativo|execut|desenvolv)", re.IGNORECASE)
+    else:
+        rx = re.compile(re.escape(status_norm), re.IGNORECASE)
+        
     try:
-        projects = await list_projects_by_status(client, status, top_k=5000)
-        return len(projects)
+        return len(list(mongo()[COLL_PROJETOS].find({"situacao": rx}, {"_id": 1})))
     except Exception as e:
         print(f"Erro ao contar projetos por status: {e}")
         return -1
 
+# --- FUNÇÕES DE ESCRITA (CREATE/UPDATE/IMPORT) CONTINUAM USANDO API ---
+
 async def update_project(client: httpx.AsyncClient, pid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
+    """Atualiza um projeto via API."""
     auth_headers = await get_api_auth_headers(client, use_json=True)
     allowed = {"nome", "descricao", "categoria", "situacao", "prazo", "responsavel_id"}
     payload = {k: v for k, v in patch.items() if k in allowed and v is not None}
@@ -726,41 +721,42 @@ async def update_project(client: httpx.AsyncClient, pid: str, patch: Dict[str, A
     resp.raise_for_status(); return resp.json()
 
 async def create_project(client: httpx.AsyncClient, doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Cria um projeto via API."""
     data = pick(doc, ["nome", "situacao", "prazo", "descricao", "categoria"])
     if not data.get("nome"): raise ValueError("nome é obrigatório")
     
     responsavel_str = doc.get("responsavel") 
-    resolved_id = await resolve_responsavel_id(client, responsavel_str)
+    resolved_id = await resolve_responsavel_id(responsavel_str) # Usa helper do Mongo
     data["responsavel_id"] = resolved_id
     
-    return await create_project_api(client, data)
+    return await create_project_api(client, data) # Chama API
     
 async def create_task(client: httpx.AsyncClient, doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Cria uma tarefa via API."""
     data = pick(doc, ["nome", "descricao", "prioridade", "status", "data_inicio", "data_fim", "documento_referencia", "concluido"])
     if not data.get("nome"): raise ValueError("nome é obrigatório")
 
-    # --- CORREÇÃO: RESOLVER NOME DO PROJETO PARA ID ---
-    projeto_nome_ou_id = doc.get("projeto_id") # IA vai mandar nome ou ID aqui
+    projeto_nome_ou_id = doc.get("projeto_id")
     resolved_proj_id = None
     if projeto_nome_ou_id:
         if len(projeto_nome_ou_id) == 24 and all(c in '0123456789abcdef' for c in projeto_nome_ou_id):
-             resolved_proj_id = projeto_nome_ou_id # Já é um ID
+             resolved_proj_id = projeto_nome_ou_id
         else:
-             resolved_proj_id = await find_project_id_by_name(client, projeto_nome_ou_id) # Busca pelo nome
+             resolved_proj_id = await find_project_id_by_name(projeto_nome_ou_id) # Usa helper do Mongo
     
     if not resolved_proj_id:
         raise ValueError(f"Projeto '{projeto_nome_ou_id}' não encontrado.")
     
     data["projeto_id"] = resolved_proj_id
-    # --- FIM DA CORREÇÃO ---
 
     responsavel_str = doc.get("responsavel") 
-    resolved_id = await resolve_responsavel_id(client, responsavel_str)
+    resolved_id = await resolve_responsavel_id(responsavel_str) # Usa helper do Mongo
     data["responsavel_id"] = resolved_id
     
-    return await create_task_api(client, data)
+    return await create_task_api(client, data) # Chama API
     
 async def update_task(client: httpx.AsyncClient, tid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
+    """Atualiza uma tarefa via API."""
     auth_headers = await get_api_auth_headers(client, use_json=True)
     allowed = {"nome", "descricao", "prioridade", "status", "data_inicio", "data_fim", "responsavel_id", "projeto_id"}
     payload = {k: v for k, v in patch.items() if k in allowed and v is not None}
@@ -770,7 +766,8 @@ async def update_task(client: httpx.AsyncClient, tid: str, patch: Dict[str, Any]
     resp.raise_for_status(); return resp.json()
 
 async def import_project_from_url_tool(
-    client: httpx.AsyncClient, # Adicionado client
+    # Esta função já usa a lógica híbrida correta (lê do mongo, escreve na api)
+    # Não precisa do 'client' como argumento, pois 'tasks_from_xlsx_logic' cria o seu.
     xlsx_url: str, 
     projeto_nome: str, 
     projeto_situacao: str, 
@@ -779,17 +776,6 @@ async def import_project_from_url_tool(
     projeto_descricao: Optional[str] = None,
     projeto_categoria: Optional[str] = None
 ) -> Dict[str, Any]:
-    # Esta função já usa a API, mas precisa do 'client'
-    # que não estava sendo passado.
-    # Vamos mockar o client dentro dela por enquanto,
-    # pois a lógica de `tasks_from_xlsx_logic` é síncrona
-    # e não está preparada para `await`.
-    # NOTA: `tasks_from_xlsx_logic` deve ser refatorada para async
-    # mas isso é uma mudança maior.
-    
-    # Solução rápida: `tasks_from_xlsx_logic` já usa `httpx.AsyncClient()`
-    # internamente, então está OK.
-    
     return await tasks_from_xlsx_logic(
         projeto_id=None, projeto_nome=projeto_nome,
         create_project_flag=1, projeto_situacao=projeto_situacao,
@@ -819,22 +805,25 @@ def toolset() -> Tool:
     return Tool(function_declarations=fns)
 
 async def exec_tool(client: httpx.AsyncClient, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    """Executa a ferramenta chamada, agora passando o client."""
+    """Executa a ferramenta chamada (modelo híbrido)."""
     try:
-        # --- TODAS AS FUNÇÕES AGORA SÃO ASYNC E RECEBEM 'client' ---
-        if name == "count_all_projects": return {"ok": True, "data": await count_all_projects(client)}
-        if name == "count_projects_by_status": return {"ok": True, "data": await count_projects_by_status(client, args["status"])}
-        if name == "list_all_projects": return {"ok": True, "data": await list_all_projects(client, args.get("top_k", 500))}
-        if name == "list_all_tasks": return {"ok": True, "data": await list_all_tasks(client, args.get("top_k", 2000))}
-        if name == "list_all_funcionarios": return {"ok": True, "data": await list_all_funcionarios(client, args.get("top_k", 500))}
-        if name == "list_tasks_by_deadline_range": return {"ok": True, "data": await list_tasks_by_deadline_range(client, args["start"], args["end"], args.get("top_k", 50))}
-        if name == "upcoming_deadlines": return {"ok": True, "data": await upcoming_deadlines(client, args.get("days", 14), args.get("top_k", 50))}
-        if name == "list_projects_by_status": return {"ok": True, "data": await list_projects_by_status(client, args["status"], args.get("top_k", 50))}
+        # --- FUNÇÕES DE LEITURA (usando MONGO, não precisam do client) ---
+        if name == "count_all_projects": return {"ok": True, "data": await count_all_projects()}
+        if name == "count_projects_by_status": return {"ok": True, "data": await count_projects_by_status(args["status"])}
+        if name == "list_all_projects": return {"ok": True, "data": await list_all_projects(args.get("top_k", 500))}
+        if name == "list_all_tasks": return {"ok": True, "data": await list_all_tasks(args.get("top_k", 2000))}
+        if name == "list_all_funcionarios": return {"ok": True, "data": await list_all_funcionarios(args.get("top_k", 500))}
+        if name == "list_tasks_by_deadline_range": return {"ok": True, "data": await list_tasks_by_deadline_range(args["start"], args["end"], args.get("top_k", 50))}
+        if name == "upcoming_deadlines": return {"ok": True, "data": await upcoming_deadlines(args.get("days", 14), args.get("top_k", 50))}
+        if name == "list_projects_by_status": return {"ok": True, "data": await list_projects_by_status(args["status"], args.get("top_k", 50))}
+
+        # --- FUNÇÕES DE ESCRITA (usando API, precisam do client) ---
         if name == "update_project": return {"ok": True, "data": await update_project(client, args["project_id"], args.get("patch", {}))}
         if name == "create_project": return {"ok": True, "data": await create_project(client, args)}
         if name == "create_task": return {"ok": True, "data": await create_task(client, args)}
         if name == "update_task": return {"ok": True, "data": await update_task(client, args["task_id"], args.get("patch", {}))}
-        if name == "import_project_from_url": return {"ok": True, "data": await import_project_from_url_tool(client, **args)}
+        if name == "import_project_from_url": return {"ok": True, "data": await import_project_from_url_tool(**args)}
+        
         return {"ok": False, "error": f"função desconhecida: {name}"}
     except Exception as e:
         detail = str(e)
@@ -844,9 +833,7 @@ async def exec_tool(client: httpx.AsyncClient, name: str, args: Dict[str, Any]) 
                 detail = err_json.get("detail", err_json.get("erro", str(e)))
             except Exception: 
                 detail = e.response.text
-        # --- MELHORIA NO LOG DE ERRO ---
         print(f"Erro ao executar ferramenta '{name}': {detail}")
-        # --- FIM DA MELHORIA ---
         return {"ok": False, "error": detail}
 
 def _normalize_answer(raw: str, nome_usuario: str) -> str:
@@ -878,7 +865,7 @@ async def chat_with_tools(user_msg: str, history: Optional[List[HistoryMessage]]
     tools = [toolset()]
     tool_steps: List[Dict[str, Any]] = []
     
-    # --- NOVO: Criar um http client para ser usado por todas as ferramentas ---
+    # O client http ainda é necessário para as funções de ESCRITA
     async with httpx.AsyncClient() as client:
         # Preenche o cache de autenticação antes de tudo
         await get_api_auth_headers(client) 
@@ -909,7 +896,7 @@ async def chat_with_tools(user_msg: str, history: Optional[List[HistoryMessage]]
                 if name in ("list_projects_by_deadline_range", "list_tasks_by_deadline_range") and (not args.get("start") or not args.get("end")):
                     args["start"], args["end"] = inicio_mes, fim_mes
                 
-                # --- NOVO: Passa o 'client' para o executor ---
+                # Passa o 'client' para o executor (ele só será usado se for uma função de escrita)
                 result = await exec_tool(client, name, args)
                 tool_steps.append({"call": {"name": name, "args": args}, "result": result})
                 
