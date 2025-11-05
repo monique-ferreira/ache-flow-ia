@@ -936,7 +936,7 @@ async def chat_with_tools(user_msg: str, history: Optional[List[HistoryMessage]]
                 args["start"], args["end"] = inicio_mes, fim_mes
                 result = await exec_tool(name, args, id_usuario)
                 tool_steps.append({"call": {"name": name, "args": args}, "result": result})            
-            contents.append(Content(role="tool", parts=[Part.from_function_response(name=name, response=result)]))
+                contents.append(Content(role="tool", parts=[Part.from_function_response(name=name, response=result)]))
             
     return {"answer": _normalize_answer("Concluí as ações solicitadas.", nome_usuario), "tool_steps": tool_steps}
 
