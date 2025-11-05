@@ -403,6 +403,9 @@ def extract_hidden_message(raw_text: str) -> str:
     Encontra palavras com letras maiúsculas "fora do lugar" e
     extrai as letras maiúsculas de cada palavra, unindo-as com espaços
     para formar a frase secreta.
+    
+    CORRIGIDO (V6): Ignora siglas (UPPER) e inícios de frase
+    (incluindo frases com múltiplas palavras maiúsculas, como "Na Etapa...").
     """
     if not raw_text:
         return ""
@@ -413,38 +416,42 @@ def extract_hidden_message(raw_text: str) -> str:
     text = re.sub(r"\s+", " ", text)
     
     words = text.split()
-    sentence_enders = (".", "!", "?")
+    
+    sentence_enders = (".", "!", "?", ":")
 
     for i, word in enumerate(words):
         clean_word = word.rstrip(f",;:.\"'{''.join(sentence_enders)}")
+        
         if not clean_word or len(clean_word) < 1:
             continue
 
-        if (
-            not clean_word.islower() and 
-            not clean_word.isupper() and 
-            not clean_word.istitle()
-        ):
-            caps = re.sub(r"[^A-Z]", "", clean_word)
-            if caps:
-                secret_parts.append(caps)
-            continue 
+        if clean_word.islower():
+            continue
 
-        if clean_word.istitle():
-            if i == 0:
-                continue
-            
-            prev_word = words[i-1]
-            
-            if prev_word.endswith(sentence_enders):
-                continue
-            
-            clean_prev_word = prev_word.rstrip(f",;:\"'{''.join(sentence_enders)}")
-            if clean_prev_word and clean_prev_word[-1] in sentence_enders:
-                continue
+        if clean_word.isupper():
+            continue
 
-            first_cap = clean_word[0]
-            secret_parts.append(first_cap)
+        is_start_of_sentence = False
+        if i == 0:
+            is_start_of_sentence = True # É a primeira palavra do texto
+        else:
+            prev_word_raw = words[i-1]
+            prev_word_clean = prev_word_raw.rstrip(f",;:.\"'{''.join(sentence_enders)}")
+
+            if any(prev_word_raw.endswith(ender) for ender in sentence_enders):
+                is_start_of_sentence = True
+            
+            elif not prev_word_clean.islower():
+                if prev_word_clean.istitle() or prev_word_clean.isupper():
+                    is_start_of_sentence = True
+        
+        if is_start_of_sentence and clean_word.istitle():
+            continue
+
+        caps = re.sub(r"[^A-Z]", "", word) 
+        
+        if caps:
+            secret_parts.append(caps)
 
     return " ".join(secret_parts)
     
