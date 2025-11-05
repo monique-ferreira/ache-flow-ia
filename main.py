@@ -968,23 +968,21 @@ async def import_project_from_url_tool(
     projeto_prazo: str, 
     projeto_responsavel: str,
     projeto_descricao: Optional[str] = None,
-    projeto_categoria: Optional[str] = None
+    projeto_categoria: Optional[str] = None,
+    user_id: Optional[str] = None
 ) -> Dict[str, Any]:
-    
-    # --- LÓGICA DE GSHEET PARA A IA ---
-    # A IA não sabe a diferença, então tratamos GSheet URL aqui também.
     effective_xlsx_url = xlsx_url
     if "docs.google.com/spreadsheets" in (xlsx_url or "").lower():
         sheet_id = extract_gsheet_id(xlsx_url)
         if sheet_id:
             effective_xlsx_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
-    # --- FIM DA LÓGICA DE GSHEET ---
+    prazo_formatado = _parse_date_robust(projeto_prazo)
 
     return await tasks_from_xlsx_logic(
         projeto_id=None, projeto_nome=projeto_nome,
         user_id=None, # Import via tool usa o token padrão (ia-admin)
         create_project_flag=1, projeto_situacao=projeto_situacao,
-        projeto_prazo=projeto_prazo, projeto_responsavel=projeto_responsavel,
+        projeto_prazo=prazo_formatado, projeto_responsavel=projeto_responsavel,
         projeto_descricao=projeto_descricao, projeto_categoria=projeto_categoria,
         xlsx_url=effective_xlsx_url, # Passa a URL tratada
         file_bytes=None
@@ -1019,7 +1017,6 @@ def toolset() -> Tool:
     ]
     return Tool(function_declarations=fns)
 
-# --- CORREÇÃO: 'exec_tool' atualizado ---
 async def exec_tool(name: str, args: Dict[str, Any], user_id: Optional[str] = None) -> Dict[str, Any]:
     try:
         if name == "count_all_projects": return {"ok": True, "data": count_all_projects()}
@@ -1036,14 +1033,12 @@ async def exec_tool(name: str, args: Dict[str, Any], user_id: Optional[str] = No
         if name == "count_tasks_by_status": return {"ok": True, "data": count_tasks_by_status(args["status"])}
         if name == "find_project_responsavel": return {"ok": True, "data": find_project_responsavel(args["project_name"])}
         if name == "count_tasks_in_project": return {"ok": True, "data": count_tasks_in_project(args["project_name"])}
-        # --- ADIÇÃO: Nova ferramenta 'list_tasks_by_project_name' ---
         if name == "list_tasks_by_project_name": return {"ok": True, "data": list_tasks_by_project_name(args["project_name"], args.get("top_k", 10))}
-        
         if name == "update_project": return {"ok": True, "data": await update_project(args["project_id"], args.get("patch", {}))}
         if name == "create_project": return {"ok": True, "data": await create_project(args, user_id=user_id)}
         if name == "create_task": return {"ok": True, "data": await create_task(args)}
         if name == "update_task": return {"ok": True, "data": await update_task(args["task_id"], args.get("patch", {}))}
-        if name == "import_project_from_url": return {"ok": True, "data": await import_project_from_url_tool(**args)}
+        if name == "import_project_from_url": return {"ok": True, "data": await import_project_from_url_tool(**args, user_id=user_id)}
         return {"ok": False, "error": f"função desconhecida: {name}"}
     except Exception as e:
         detail = str(e)
