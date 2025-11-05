@@ -1280,24 +1280,40 @@ async def ai_chat_with_pdf(
         PERGUNTA DO USUÁRIO: {pergunta}
         """
         
-        out = await chat_with_tools(
-            user_msg=contexto_prompt, 
-            history=None, # Ignora o histórico para focar no PDF
-            nome_usuario=nome_usuario,
-            email_usuario=email_usuario, 
-            id_usuario=id_usuario        
+        data_hoje, (inicio_mes, fim_mes) = iso_date(today()), month_bounds(today())
+        nome_usuario_fmt = nome_usuario or "você"
+        email_usuario_fmt = email_usuario or "email.desconhecido"
+        id_usuario_fmt = id_usuario or "id.desconhecido"
+        
+        system_prompt_filled = SYSTEM_PROMPT.format(
+            nome_usuario=nome_usuario_fmt, email_usuario=email_usuario_fmt, id_usuario=id_usuario_fmt,
+            data_hoje=data_hoje, inicio_mes=inicio_mes, fim_mes=fim_mes,
         )
+        
+        model = init_model(system_prompt_filled)
+        
+        contents = [Content(role="user", parts=[Part.from_text(contexto_prompt)])]
+        
+        resp = model.generate_content(contents, tools=None)
+        
+        final_text = ""
+        if resp.candidates and resp.candidates[0].content and resp.candidates[0].content.parts:
+            final_text = getattr(resp.candidates[0].content.parts[0], "text", "") or ""
+
+        final_text = re.sub(r"(?i)(aguarde( um instante)?|só um momento|apenas um instante)[^\n]*", "", final_text).strip()
+        final_answer = _normalize_answer(final_text, nome_usuario_fmt)
+        
         
         response_data = {
             "tipo_resposta": "TEXTO_PDF",
-            "conteudo_texto": out.get("answer", "Desculpe, não consegui processar sua solicitação."),
-            "dados": out.get("tool_steps") # (geralmente vazio, mas mantido)
+            "conteudo_texto": final_answer,
+            "dados": []
         }
         return JSONResponse(response_data)
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao processar chat com PDF: {str(e)}")
-
+        raise e
+    
 @app.post("/pdf/extract-text")
 async def pdf_extract_text(file: UploadFile = File(...), _ = Depends(require_api_key)):
     """
