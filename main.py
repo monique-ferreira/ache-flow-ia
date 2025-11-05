@@ -1260,21 +1260,39 @@ async def ai_chat_with_pdf(
     """
     Endpoint de chat que "lê" um PDF enviado e usa o conteúdo
     como contexto para responder a pergunta do usuário.
+    
+    Este endpoint age como um mini-agente:
+    1. Extrai o texto completo (para RAG).
+    2. Pré-calcula a resposta do enigma (para a ferramenta).
+    3. Decide se usa a ferramenta (para enigmas) ou o RAG (para o resto).
     """
     try:
         pdf_bytes = await file.read()
+        
         pdf_text = extract_full_pdf_text(pdf_bytes)
+        hidden_message = extract_hidden_message(pdf_text)
         
         if not pdf_text:
             raise HTTPException(status_code=422, detail="Não foi possível extrair texto do PDF enviado.")
 
+        pdf_tools_list = [
+            FunctionDeclaration(
+                name="solve_pdf_enigma",
+                description="Resolve o enigma de 'frase secreta' do PDF. Use esta ferramenta se o usuário perguntar sobre 'enigma', 'frase secreta', 'código', 'mensagem escondida', etc.",
+                parameters={"type": "object", "properties": {}}
+            )
+        ]
+        pdf_tool = Tool(function_declarations=pdf_tools_list)
+
         contexto_prompt = f"""
-        Use o CONTEÚDO DO DOCUMENTO abaixo para responder a PERGUNTA DO USUÁRIO.
-        Responda apenas com base no documento. Se a resposta não estiver no
-        documento, diga "Essa informação não está no documento fornecido."
+        Use o CONTEÚDO DO DOCUMENTO abaixo E/OU a ferramenta 'solve_pdf_enigma'
+        para responder a PERGUNTA DO USUÁRIO.
+
+        - Se a pergunta for sobre o 'enigma', 'frase secreta', 'código' ou 'mensagem escondida', USE A FERRAMENTA 'solve_pdf_enigma'.
+        - Para TODAS as outras perguntas (ex: 'quantos textos', 'qual o resumo'), responda APENAS com base no CONTEÚDO DO DOCUMENTO.
 
         ==================== CONTEÚDO DO DOCUMENTO ====================
-        {pdf_text[:15000]} 
+        {pdf_text[:10000]} 
         ===============================================================
 
         PERGUNTA DO USUÁRIO: {pergunta}
@@ -1291,10 +1309,25 @@ async def ai_chat_with_pdf(
         )
         
         model = init_model(system_prompt_filled)
-        
         contents = [Content(role="user", parts=[Part.from_text(contexto_prompt)])]
         
-        resp = model.generate_content(contents, tools=None)
+        resp = model.generate_content(contents, tools=[pdf_tool])
+        
+        if (
+            resp.candidates and resp.candidates[0].content and 
+            resp.candidates[0].content.parts and 
+            getattr(resp.candidates[0].content.parts[0], "function_call", None)
+        ):
+            call = resp.candidates[0].content.parts[0].function_call
+            
+            if call.name == "solve_pdf_enigma":
+                result = {"message": hidden_message or "Nenhuma mensagem encontrada."}
+                
+                contents.append(resp.candidates[0].content)
+                contents.append(Content(role="tool", parts=[Part.from_function_response(name=call.name, response=result)]))
+                
+                final_resp = model.generate_content(contents, tools=[pdf_tool])
+                resp = final_resp 
         
         final_text = ""
         if resp.candidates and resp.candidates[0].content and resp.candidates[0].content.parts:
@@ -1302,7 +1335,6 @@ async def ai_chat_with_pdf(
 
         final_text = re.sub(r"(?i)(aguarde( um instante)?|só um momento|apenas um instante)[^\n]*", "", final_text).strip()
         final_answer = _normalize_answer(final_text, nome_usuario_fmt)
-        
         
         response_data = {
             "tipo_resposta": "TEXTO_PDF",
@@ -1313,7 +1345,7 @@ async def ai_chat_with_pdf(
 
     except Exception as e:
         raise e
-    
+        
 @app.post("/pdf/extract-text")
 async def pdf_extract_text(file: UploadFile = File(...), _ = Depends(require_api_key)):
     """
