@@ -74,9 +74,9 @@ TASKS_API_USERNAME       = os.getenv("TASKS_API_USERNAME")
 TASKS_API_PASSWORD       = os.getenv("TASKS_API_PASSWORD")
 ACHEFLOW_MAIN_API_TOKEN = os.getenv("ACHEFLOW_API_TOKEN") 
 
-TIMEOUT_S = int(os.getenv("TIMEOUT_S", "90"))
-GENERIC_USER_AGENT = os.getenv("GENERIC_USER_AGENT", "ache-flow-ia/1.0 (+https://tistto.com.br)")
-PDF_USER_AGENT     = os.getenv("PDF_USER_AGENT", GENERIC_USER_AGENT)
+TIMEOUT_S = 90
+GENERIC_USER_AGENT = "ache-flow-ia/1.0"
+PDF_USER_AGENT     = GENERIC_USER_AGENT
 
 MAX_TOOL_STEPS = 6
 DEFAULT_TOP_K = 8
@@ -84,7 +84,7 @@ DEFAULT_TOP_K = 8
 # =========================
 # FastAPI App (Único)
 # =========================
-app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="2.0.3") # Versão
+app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="2.0.4") # Versão
 
 # === ADICIONADO BLOCO CORS ===
 # Lista de domínios que podem acessar sua API
@@ -162,6 +162,15 @@ def to_oid(id_str: str) -> ObjectId:
 def pick(d: Dict[str, Any], keys: List[str]) -> Dict[str, Any]:
     return {k: d.get(k) for k in keys if k in d}
 
+def extract_gsheet_id(url: str) -> Optional[str]:
+    """Extrai o ID de uma URL do Google Sheets."""
+    if not url: return None
+    # Regex para .../d/SHEET_ID/.... (IDs têm tipicamente 44 caracteres)
+    m = re.search(r"/d/([a-zA-Z0-9_-]{40,})", url)
+    if m:
+        return m.group(1)
+    return None
+
 # main.py - Linha 160 (VERSÃO NOVA E RECURSIVA)
 def sanitize_doc(data: Any) -> Any:
     # Se for um datetime ou date, converte para string
@@ -192,16 +201,11 @@ def mongo():
         raise RuntimeError("MONGO_URI não foi definida")
     client = MongoClient(MONGO_URI)
     try:
-        # get_default_database() PEGA O DB DA PRÓPRIA URI.
-        # Ex: ...mongodb.net/acheflow_db? -> usa 'acheflow_db'
         db = client.get_default_database()
         
-        # Forçamos uma checagem de conexão para garantir que a URI
-        # e as regras de Firewall do Atlas estão corretas.
         db.command("ping") 
         return db
     except Exception as e:
-        # Se falhar, é provável que a URI esteja errada ou o IP do Cloud Run não esteja liberado
         raise RuntimeError(f"Não foi possível conectar ao MongoDB. Verifique a MONGO_URI e o firewall do Atlas. Erro: {e}")
 
 def _parse_date_robust(date_str: str) -> str:
@@ -211,14 +215,11 @@ def _parse_date_robust(date_str: str) -> str:
     """
     date_str = (date_str or "").strip()
     try:
-        # Tenta formato DD/MM/AAAA
         return datetime.strptime(date_str, "%d/%m/%Y").date().isoformat()
     except ValueError:
         try:
-            # Tenta formato DD-MM-AAAA
             return datetime.strptime(date_str, "%d-%m-%Y").date().isoformat()
         except ValueError:
-            # Assume que já está em AAAA-MM-DD ou é inválido (deixa a API de destino decidir)
             return date_str
 
 def _get_employee_map() -> Dict[str, str]:
@@ -274,15 +275,33 @@ def _enrich_doc_with_responsavel(doc: Dict[str, Any], employee_map: Dict[str, st
 
 # =========================
 # Helpers de Download (PDF/XLSX)
-# (Omitidos por brevidade)
 # =========================
 def fetch_bytes(url: str) -> bytes:
     if not url: raise ValueError("URL ausente")
     u = url.strip()
     if not u.lower().startswith(("http://", "https://")): raise ValueError("URL inválida")
-    r = requests.get(u, timeout=TIMEOUT_S, allow_redirects=True, headers={"User-Agent": GENERIC_USER_AGENT})
-    r.raise_for_status()
-    return r.content
+    
+    headers = {"User-Agent": GENERIC_USER_AGENT}
+    
+    is_google_export = "docs.google.com" in u and "export?format=xlsx" in u
+    
+    if is_google_export:
+        with requests.get(u, timeout=TIMEOUT_S, allow_redirects=True, headers=headers, stream=True) as r:
+            r.raise_for_status()
+            
+            ctype = (r.headers.get("Content-Type") or "").lower()
+            if "openxmlformats-officedocument.spreadsheetml.sheet" not in ctype:
+                raise ValueError(f"URL do Google não retornou um XLSX. Content-Type: {ctype}")
+            
+            content_bytes = io.BytesIO()
+            for chunk in r.iter_content(chunk_size=8192):
+                content_bytes.write(chunk)
+            return content_bytes.getvalue()
+    else:
+        r = requests.get(u, timeout=TIMEOUT_S, allow_redirects=True, headers=headers)
+        r.raise_for_status()
+        return r.content
+
 def _try_download_traced(url: str, timeout: int, user_agent: str):
     headers = {"User-Agent": user_agent, "Accept": "application/pdf, */*"}
     with requests.get(url, timeout=timeout, allow_redirects=True, headers=headers, stream=False) as r:
@@ -516,11 +535,10 @@ def resolve_descricao_pdf(row) -> str:
         return extracted if extracted else full_token
     return re.sub(r"(?i)\b((?:Doc\.?\s*)?(Texto\.?\d+))\b\.?", _repl, como)
 
-# --- CORREÇÃO: Adicionado 'user_id' à definição da função ---
 async def tasks_from_xlsx_logic(
     projeto_id: Optional[str],
     projeto_nome: Optional[str],
-    user_id: Optional[str], # <-- CORREÇÃO: Recebe o ID do usuário logado
+    user_id: Optional[str],
     create_project_flag: int,
     projeto_situacao: Optional[str],
     projeto_prazo: Optional[str],
@@ -530,13 +548,18 @@ async def tasks_from_xlsx_logic(
     xlsx_url: Optional[str],
     file_bytes: Optional[bytes]
 ) -> Dict[str, Any]:
-    if xlsx_url:
-        xbytes = fetch_bytes(xlsx_url)
-        df = xlsx_bytes_to_dataframe_preserving_hyperlinks(xbytes)
-    elif file_bytes:
-        df = xlsx_bytes_to_dataframe_preserving_hyperlinks(file_bytes)
-    else:
-        raise HTTPException(status_code=400, detail={"erro": "Forneça 'xlsx_url' ou envie um 'file'."})
+    
+    try:
+        if file_bytes:
+            df = xlsx_bytes_to_dataframe_preserving_hyperlinks(file_bytes)
+        elif xlsx_url:
+            xbytes = fetch_bytes(xlsx_url) 
+            df = xlsx_bytes_to_dataframe_preserving_hyperlinks(xbytes)
+        else:
+            raise HTTPException(status_code=400, detail={"erro": "Nenhuma fonte de dados (file, xlsx_url, google_sheet_url) fornecida."})
+    except Exception as e:
+        raise HTTPException(status_code=422, detail={"erro": f"Falha ao processar planilha: {str(e)}"})
+
     required = {"Nome", "Como Fazer", "Documento Referência"}
     if not required.issubset(df.columns):
         missing = required - set(df.columns)
@@ -664,7 +687,7 @@ Sua tarefa é preencher os argumentos para as ferramentas.
 **REGRA PRINCIPAL:** Sempre tente extrair os parâmetros (como nome, prazo, etc.) da ÚLTIMA MENSAGEM DO USUÁRIO.
 
 - **SE** você conseguir extrair TODOS os argumentos necessários da mensagem (ex: "criar projeto X, prazo Y, resp Z"):
-    - NÃO PERGUNTE NADA. Sua única ação deve ser a chamada da ferramenta (ex: `create_project`). NÃO GERE NENHUM TEXTO PARA O USUÁRIO ANTES DE RECEBER O RESULTADO DA FERRAMENTA.
+    - NÃO PERGUNTE NADA. Sua única ação deve ser a chamada da ferramenta (ex: `create_project`). NÃO GERE NENHUM TEXTO PARA O USUÁRIOS ANTES DE RECEBER O RESULTADO DA FERRAMENTA.
 - **SE** algum argumento estiver faltando (ex: "criar projeto X"):
     - AÍ SIM, pergunte APENAS pelos argumentos que faltam (ex: "Claro! Qual o prazo e o responsável?").
 
@@ -943,13 +966,24 @@ async def import_project_from_url_tool(
     projeto_descricao: Optional[str] = None,
     projeto_categoria: Optional[str] = None
 ) -> Dict[str, Any]:
+    
+    # --- LÓGICA DE GSHEET PARA A IA ---
+    # A IA não sabe a diferença, então tratamos GSheet URL aqui também.
+    effective_xlsx_url = xlsx_url
+    if "docs.google.com/spreadsheets" in (xlsx_url or "").lower():
+        sheet_id = extract_gsheet_id(xlsx_url)
+        if sheet_id:
+            effective_xlsx_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
+    # --- FIM DA LÓGICA DE GSHEET ---
+
     return await tasks_from_xlsx_logic(
         projeto_id=None, projeto_nome=projeto_nome,
         user_id=None, # Import via tool usa o token padrão (ia-admin)
         create_project_flag=1, projeto_situacao=projeto_situacao,
         projeto_prazo=projeto_prazo, projeto_responsavel=projeto_responsavel,
         projeto_descricao=projeto_descricao, projeto_categoria=projeto_categoria,
-        xlsx_url=xlsx_url, file_bytes=None
+        xlsx_url=effective_xlsx_url, # Passa a URL tratada
+        file_bytes=None
     )
 
 # --- CORREÇÃO: 'toolset()' atualizado ---
@@ -971,7 +1005,7 @@ def toolset() -> Tool:
         FunctionDeclaration(name="create_task", description="Cria uma nova tarefa.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "projeto_id": {"type": "string"}, "responsavel_id": {"type": "string"}, "prazo": {"type": "string"}, "status": {"type": "string"}}, "required": ["nome", "projeto_id", "responsavel_id", "prazo", "status"]}),
         # --- CORREÇÃO: Removido 'data_inicio' de 'update_task' ---
         FunctionDeclaration(name="update_task", description="Atualiza campos de uma tarefa.", parameters={"type": "object", "properties": {"task_id": {"type": "string"}, "patch": {"type": "object", "properties": {"nome": {"type": "string"}, "status": {"type": "string"}, "prazo": {"type": "string"}, "responsavel_id": {"type": "string"}}}}, "required": ["task_id", "patch"]}),
-        FunctionDeclaration(name="import_project_from_url", description="Cria um projeto e importa tarefas a partir de uma URL de arquivo .xlsx.", parameters={"type": "object", "properties": {"xlsx_url": {"type": "string"}, "projeto_nome": {"type": "string"}, "projeto_situacao": {"type": "string"}, "projeto_prazo": {"type": "string"}, "projeto_responsavel": {"type": "string"}, "projeto_descricao": {"type": "string"}, "projeto_categoria": {"type": "string"}}, "required": ["xlsx_url", "projeto_nome", "projeto_situacao", "projeto_prazo", "projeto_responsavel"]}),
+        FunctionDeclaration(name="import_project_from_url", description="Cria um projeto e importa tarefas a partir de uma URL de arquivo .xlsx ou Google Sheets.", parameters={"type": "object", "properties": {"xlsx_url": {"type": "string"}, "projeto_nome": {"type": "string"}, "projeto_situacao": {"type": "string"}, "projeto_prazo": {"type": "string"}, "projeto_responsavel": {"type": "string"}, "projeto_descricao": {"type": "string"}, "projeto_categoria": {"type": "string"}}, "required": ["xlsx_url", "projeto_nome", "projeto_situacao", "projeto_prazo", "projeto_responsavel"]}),
         FunctionDeclaration(name="list_tasks_by_status", description="Lista tarefas com base em um status exato (ex: 'não iniciada', 'concluída').", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
         FunctionDeclaration(name="count_tasks_by_status", description="Conta tarefas com base em um status exato (ex: 'não iniciada', 'concluída').", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
         FunctionDeclaration(name="find_project_responsavel", description="Encontra o nome do responsável por um projeto (busca por nome exato).", parameters={"type": "object", "properties": {"project_name": {"type": "string"}}, "required": ["project_name"]}),
@@ -1112,16 +1146,34 @@ async def tasks_from_xlsx(
     projeto_descricao: Optional[str] = Form(None),
     projeto_categoria: Optional[str] = Form(None),
     xlsx_url: Optional[str] = Form(None),
+    google_sheet_url: Optional[str] = Form(None), # <-- NOVO CAMPO
     file: Optional[UploadFile] = File(None)
 ):
     file_bytes = await file.read() if file else None
+    effective_xlsx_url = xlsx_url
+
+    sources = sum(p is not None for p in [file_bytes, xlsx_url, google_sheet_url])
+    
+    if sources > 1:
+        raise HTTPException(status_code=400, detail={"erro": "Use apenas UMA fonte de dados: 'google_sheet_url' OU 'xlsx_url' OU 'file'."})
+    elif sources == 0:
+        raise HTTPException(status_code=400, detail={"erro": "Nenhuma fonte de dados fornecida (google_sheet_url, xlsx_url, ou file)."})
+
+    if google_sheet_url:
+        sheet_id = extract_gsheet_id(google_sheet_url)
+        if not sheet_id:
+            raise HTTPException(status_code=400, detail={"erro": "Google Sheet URL inválida. Não foi possível extrair o ID."})
+        
+        effective_xlsx_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
+
     result = await tasks_from_xlsx_logic(
         projeto_id=projeto_id, projeto_nome=projeto_nome,
-        user_id=id_usuario, # <-- CORREÇÃO: Passa o ID para a lógica
+        user_id=id_usuario,
         create_project_flag=create_project_flag, projeto_situacao=projeto_situacao,
         projeto_prazo=projeto_prazo, projeto_responsavel=projeto_responsavel,
         projeto_descricao=projeto_descricao, projeto_categoria=projeto_categoria,
-        xlsx_url=xlsx_url, file_bytes=file_bytes
+        xlsx_url=effective_xlsx_url, # Passa a URL (original ou GSheet-export)
+        file_bytes=file_bytes       # Passa o arquivo (se houver)
     )
     return result
 
