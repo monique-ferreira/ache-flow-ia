@@ -204,7 +204,22 @@ def mongo():
         # Se falhar, é provável que a URI esteja errada ou o IP do Cloud Run não esteja liberado
         raise RuntimeError(f"Não foi possível conectar ao MongoDB. Verifique a MONGO_URI e o firewall do Atlas. Erro: {e}")
 
-# === INÍCIO DAS NOVAS FUNÇÕES HELPER ===
+def _parse_date_robust(date_str: str) -> str:
+    """
+    Tenta converter uma data (ex: DD/MM/AAAA ou DD-MM-AAAA) para AAAA-MM-DD.
+    Se falhar, retorna o original (assumindo que já está AAAA-MM-DD).
+    """
+    date_str = (date_str or "").strip()
+    try:
+        # Tenta formato DD/MM/AAAA
+        return datetime.strptime(date_str, "%d/%m/%Y").date().isoformat()
+    except ValueError:
+        try:
+            # Tenta formato DD-MM-AAAA
+            return datetime.strptime(date_str, "%d-%m-%Y").date().isoformat()
+        except ValueError:
+            # Assume que já está em AAAA-MM-DD ou é inválido (deixa a API de destino decidir)
+            return date_str
 
 def _get_employee_map() -> Dict[str, str]:
     """
@@ -399,7 +414,7 @@ async def create_project_api(client: httpx.AsyncClient, data: Dict[str, Any]) ->
 async def create_task_api(client: httpx.AsyncClient, data: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{TASKS_API_BASE}{TASKS_API_TASKS_PATH}"
     auth_headers = await get_api_auth_headers(client, use_json=True)
-    payload = pick(data, ["nome", "projeto_id", "responsavel_id", "descricao", "prioridade", "status", "data_inicio", "data_fim", "documento_referencia", "concluido"])
+    payload = pick(data, ["nome", "projeto_id", "responsavel_id", "descricao", "prioridade", "status", "data_inicio", "prazo", "documento_referencia", "concluido"])
     payload = {k: v for k, v in payload.items() if v is not None}
     r = await client.post(url, json=payload, headers=auth_headers, timeout=TIMEOUT_S)
     r.raise_for_status()
@@ -531,7 +546,7 @@ async def tasks_from_xlsx_logic(
                 created.append(await create_task_api(client, {
                     "nome": item["titulo"], "descricao": item["descricao"],
                     "projeto_id": resolved_project_id, "responsavel_id": resp_id,
-                    "data_fim": item["prazo"], "data_inicio": today_date.isoformat(),
+                    "prazo": item["prazo"], "data_inicio": today_date.isoformat(),
                     "documento_referencia": item["doc_ref"],
                     "status": "não iniciada", "prioridade": "média"
                 }))
@@ -571,7 +586,7 @@ REGRAS DE RESPOSTA (MAIS IMPORTANTE)
     * **Exemplo de Recusa Correta (O que você pode dizer):** "Não posso acessar os *seus* e-mails em tempo real."
     * **Exemplo de Recusa Incorreta (NÃO FAÇA ISSO):** "Não posso te dar uma receita de bolo porque não acesso a internet." (Isto é falso, você já sabe a receita no seu conhecimento pré-treinado).
     * Esta é a regra do "Foco Duplo": Primeiro, tente as ferramentas. Se falhar, use o conhecimento geral.
-    
+
 3.  **REGRA DE AMBIGUIDADE:** Se uma pergunta for ambígua (ex: "o que é um diferencial?"), responda com seu conhecimento geral. Se for sobre você (ex: "qual o *seu* diferencial?"), explique sua missão de ajudar com projetos.
 
 4.  **REGRA DE FORMATAÇÃO:**
@@ -692,24 +707,28 @@ async def update_project(pid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
 
 async def create_project(doc: Dict[str, Any]) -> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
-        data = pick(doc, ["nome", "situacao", "prazo", "descricao", "categoria"])
+        data = pick(doc, ["nome", "situacao", "descricao", "categoria"])
         if not data.get("nome"): raise ValueError("nome é obrigatório")
         
+        prazo_raw = doc.get("prazo")
+        if prazo_raw:
+            data["prazo"] = _parse_date_robust(prazo_raw)
+
         responsavel_str = doc.get("responsavel") 
         resolved_id = await resolve_responsavel_id(client, responsavel_str)
         data["responsavel_id"] = resolved_id
         
         return await create_project_api(client, data)
-    
+        
 async def create_task(doc: Dict[str, Any]) -> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
-        data = pick(doc, ["nome", "projeto_id", "responsavel_id", "descricao", "prioridade", "status", "data_inicio", "data_fim", "documento_referencia", "concluido"])
+        data = pick(doc, ["nome", "projeto_id", "responsavel_id", "descricao", "prioridade", "status", "data_inicio", "prazo", "documento_referencia", "concluido"])
         if not data.get("nome"): raise ValueError("nome é obrigatório")
         return await create_task_api(client, data)
 async def update_task(tid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
         auth_headers = await get_api_auth_headers(client, use_json=True)
-        allowed = {"nome", "descricao", "prioridade", "status", "data_inicio", "data_fim", "responsavel_id", "projeto_id"}
+        allowed = {"nome", "descricao", "prioridade", "status", "data_inicio", "prazo", "responsavel_id", "projeto_id"}
         payload = {k: v for k, v in patch.items() if k in allowed and v is not None}
         if not payload: raise ValueError("patch vazio")
         url = f"{TASKS_API_BASE}/tarefas/{tid}" 
@@ -842,8 +861,8 @@ def toolset() -> Tool:
         FunctionDeclaration(name="list_my_projects", description="Lista os projetos de responsabilidade do usuário ATUAL.", parameters={"type": "object", "properties": {}}),
         FunctionDeclaration(name="update_project", description="Atualiza campos de um projeto.", parameters={"type": "object", "properties": {"project_id": {"type": "string"}, "patch": {"type": "object", "properties": {"nome": {"type": "string"}, "situacao": {"type": "string"}, "prazo": {"type": "string"}}}}, "required": ["project_id", "patch"]}),
         FunctionDeclaration(name="create_project", description="Cria um novo projeto.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "responsavel": {"type": "string"}, "situacao": {"type": "string"}, "prazo": {"type": "string"}}, "required": ["nome", "responsavel", "situacao", "prazo"]}),
-        FunctionDeclaration(name="create_task", description="Cria uma nova tarefa.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "projeto_id": {"type": "string"}, "responsavel_id": {"type": "string"}, "data_fim": {"type": "string"}, "data_inicio": {"type": "string"}, "status": {"type": "string"}}, "required": ["nome", "projeto_id", "responsavel_id", "data_fim", "data_inicio", "status"]}),
-        FunctionDeclaration(name="update_task", description="Atualiza campos de uma tarefa.", parameters={"type": "object", "properties": {"task_id": {"type": "string"}, "patch": {"type": "object", "properties": {"nome": {"type": "string"}, "status": {"type": "string"}, "data_fim": {"type": "string"}, "responsavel_id": {"type": "string"}}}}, "required": ["task_id", "patch"]}),
+        FunctionDeclaration(name="create_task", description="Cria uma nova tarefa.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "projeto_id": {"type": "string"}, "responsavel_id": {"type": "string"}, "prazo": {"type": "string"}, "data_inicio": {"type": "string"}, "status": {"type": "string"}}, "required": ["nome", "projeto_id", "responsavel_id", "prazo", "data_inicio", "status"]}),
+        FunctionDeclaration(name="update_task", description="Atualiza campos de uma tarefa.", parameters={"type": "object", "properties": {"task_id": {"type": "string"}, "patch": {"type": "object", "properties": {"nome": {"type": "string"}, "status": {"type": "string"}, "prazo": {"type": "string"}, "responsavel_id": {"type": "string"}}}}, "required": ["task_id", "patch"]}),
         FunctionDeclaration(name="import_project_from_url", description="Cria um projeto e importa tarefas a partir de uma URL de arquivo .xlsx.", parameters={"type": "object", "properties": {"xlsx_url": {"type": "string"}, "projeto_nome": {"type": "string"}, "projeto_situacao": {"type": "string"}, "projeto_prazo": {"type": "string"}, "projeto_responsavel": {"type": "string"}, "projeto_descricao": {"type": "string"}, "projeto_categoria": {"type": "string"}}, "required": ["xlsx_url", "projeto_nome", "projeto_situacao", "projeto_prazo", "projeto_responsavel"]}),
         FunctionDeclaration(name="list_tasks_by_status", description="Lista tarefas com base em um status exato (ex: 'não iniciada', 'concluída').", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
         FunctionDeclaration(name="count_tasks_by_status", description="Conta tarefas com base em um status exato (ex: 'não iniciada', 'concluída').", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
