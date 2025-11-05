@@ -431,6 +431,7 @@ async def find_project_id_by_name(client: httpx.AsyncClient, projeto_nome: str) 
             return (hit or {}).get("_id") if hit else None
     except Exception: return None
     return None
+
 async def list_funcionarios(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
     url = f"{TASKS_API_BASE}/funcionarios"
     auth_headers = await get_api_auth_headers(client, use_json=True)
@@ -438,11 +439,34 @@ async def list_funcionarios(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
     if r.status_code != 200: return []
     try: return r.json() if isinstance(r.json(), list) else []
     except Exception: return []
-async def resolve_responsavel_id(client: httpx.AsyncClient, nome_ou_email: Optional[str]) -> Optional[str]:
+
+# Em main.py, substitua a função inteira (aprox. linha 583)
+
+async def resolve_responsavel_id(
+    client: httpx.AsyncClient, 
+    nome_ou_email: Optional[str],
+    default_user_id: Optional[str] = None
+) -> Optional[str]:
+    """
+    Encontra um ID de funcionário.
+    Prioridade:
+    1. Busca por nome/email.
+    2. Se não encontrar E nome_ou_email for 'eu', usa o default_user_id.
+    3. Se não encontrar E nome_ou_email estiver VAZIO, usa o default_user_id (se chat) ou o token (se import).
+    """
     nome_ou_email = (nome_ou_email or "").strip()
-    if not nome_ou_email: return _token_cache.get("user_id")
+    
+    fallback_id = default_user_id if default_user_id else _token_cache.get("user_id")
+
+    if nome_ou_email.lower() in ("eu", "mim", "me"):
+        return default_user_id if default_user_id else _token_cache.get("user_id")
+
+    if not nome_ou_email: 
+        return fallback_id
+
     pessoas = await list_funcionarios(client)
     key = nome_ou_email.lower()
+    
     if len(key) == 24 and all(c in '0123456789abcdef' for c in key):
         if any(p.get("_id") == key for p in pessoas): return key
     for p in pessoas:
@@ -450,7 +474,9 @@ async def resolve_responsavel_id(client: httpx.AsyncClient, nome_ou_email: Optio
     for p in pessoas:
         full = f"{str(p.get('nome') or '').lower()} {str(p.get('sobrenome') or '').lower()}".strip()
         if full == key or str(p.get('nome') or '').lower() == key: return p.get("_id")
-    return _token_cache.get("user_id")
+    
+    return fallback_id
+
 def duration_to_date(duracao: Optional[str]) -> str:
     base = datetime.utcnow().date()
     try:
@@ -567,6 +593,11 @@ REGRAS DE RESPOSTA (MAIS IMPORTANTE)
 **REGRA DE OURO: NÃO INVENTE DADOS.**
 - Se uma ferramenta for usada e retornar uma lista vazia (como `[]`), um valor 0, ou "não encontrado", sua resposta DEVE ser "Não encontrei [o que foi pedido]" (ex: "Não encontrei nenhum projeto em andamento", "Você não é responsável por nenhum projeto no momento.").
 - NUNCA, SOB NENHUMA CIRCUNSTÂNCIA, invente nomes de projetos, tarefas ou pessoas (como "Projeto Sirius" ou "José Silva"). Apenas reporte o que a ferramenta encontrou.
+
+**REGRA ANTI-CÓDIGO: VOCÊ É UM ASSISTENTE, NÃO UM PROGRAMADOR.**
+- Sua resposta para o usuário NUNCA deve ser um trecho de código, `print()`, JSON, ou qualquer coisa que se pareça com programação.
+- Sua tarefa é *chamar* a ferramenta (o que acontece em segundo plano) e *depois* dar uma resposta em português (ex: "Projeto criado com sucesso!").
+- Se você responder com `print(defaultapi.createproject...)`, você falhou gravemente na sua tarefa.
 
 1.  **REGRA DE FERRAMENTAS (PRIORIDADE 1):** Sua prioridade MÁXIMA é usar ferramentas. Se a pergunta for sobre 'projetos', 'tarefas', 'prazos', 'funcionários', 'criar', 'listar', 'contar', 'atualizar' ou 'importar', você DEVE usar as ferramentas.
     * **Exemplos de Mapeamento:**
@@ -705,7 +736,9 @@ async def update_project(pid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
         resp = await client.put(url, json=payload, headers=auth_headers)
         resp.raise_for_status(); return resp.json()
 
-async def create_project(doc: Dict[str, Any]) -> Dict[str, Any]:
+# Em main.py, substitua a função (aprox. linha 725)
+
+async def create_project(doc: Dict[str, Any], user_id: Optional[str] = None) -> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
         data = pick(doc, ["nome", "situacao", "descricao", "categoria"])
         if not data.get("nome"): raise ValueError("nome é obrigatório")
@@ -715,11 +748,16 @@ async def create_project(doc: Dict[str, Any]) -> Dict[str, Any]:
             data["prazo"] = _parse_date_robust(prazo_raw)
 
         responsavel_str = doc.get("responsavel") 
-        resolved_id = await resolve_responsavel_id(client, responsavel_str)
+        
+        resolved_id = await resolve_responsavel_id(
+            client, 
+            responsavel_str, 
+            default_user_id=user_id
+        )
         data["responsavel_id"] = resolved_id
         
         return await create_project_api(client, data)
-        
+            
 async def create_task(doc: Dict[str, Any]) -> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
         data = pick(doc, ["nome", "projeto_id", "responsavel_id", "descricao", "prioridade", "status", "data_inicio", "prazo", "documento_referencia", "concluido"])
@@ -888,7 +926,7 @@ async def exec_tool(name: str, args: Dict[str, Any], user_id: Optional[str] = No
         if name == "find_project_responsavel": return {"ok": True, "data": find_project_responsavel(args["project_name"])}
         if name == "count_tasks_in_project": return {"ok": True, "data": count_tasks_in_project(args["project_name"])}
         if name == "update_project": return {"ok": True, "data": await update_project(args["project_id"], args.get("patch", {}))}
-        if name == "create_project": return {"ok": True, "data": await create_project(args)}
+        if name == "create_project": return {"ok": True, "data": await create_project(args, user_id=user_id)}
         if name == "create_task": return {"ok": True, "data": await create_task(args)}
         if name == "update_task": return {"ok": True, "data": await update_task(args["task_id"], args.get("patch", {}))}
         if name == "import_project_from_url": return {"ok": True, "data": await import_project_from_url_tool(**args)}
