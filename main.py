@@ -680,13 +680,11 @@ Sua tarefa é preencher os argumentos para as ferramentas.
     - **AÍ SIM,** pergunte APENAS pelos argumentos **OBRIGATÓRIOS** que faltam.
     - **NÃO** pergunte por argumentos opcionais.
 
-*** --- INÍCIO DA NOVA REGRA --- ***
 **REGRA DE AÇÃO DIRETA (A MAIS IMPORTANTE):**
 - **NUNCA** responda ao usuário com uma "confirmação" antes de agir.
 - **ERRADO (NÃO FAÇA ISSO):** O usuário diz "prazo 31-12-2025". Você responde: "OK. Criando projeto com prazo 31-12-2025."
 - **CORRETO (FAÇA ISSO):** O usuário diz "prazo 31-12-2025". Você *imediatamente* chama a ferramenta `create_project(...)` em segundo plano. Somente *depois* que a ferramenta retornar `{"ok": True, "data": ...}`, você responde ao usuário: "Projeto criado com sucesso! 🙂"
 - Se o usuário disser "isso" ou "sim" para confirmar, isso é sua instrução para **CHAMAR A FERRAMENTA**, não para falar mais.
-*** --- FIM DA NOVA REGRA --- ***
 
 **1. PARA: `create_project` (Criar Projeto ÚNICO):**
 * **Argumentos OBRIGATÓRIOS:** `nome`, `situacao`, `prazo` (DD-MM-AAAA), `responsavel` (nome ou email).
@@ -695,6 +693,11 @@ Sua tarefa é preencher os argumentos para as ferramentas.
 **2. PARA: `import_project_from_url` (Importar Projeto):**
 * **Argumentos OBRIGATÓRIOS:** `xlsx_url`, `projeto_nome`, `projeto_situacao`, `projeto_prazo`, `projeto_responsavel`.
 * **Argumentos Opcionais:** `projeto_descricao`, `projeto_categoria`.
+
+**3. PARA: `update_project` (Atualizar Projeto):**
+* **Se faltar:** O `patch` (o que mudar). O nome ou ID do projeto geralmente já é conhecido.
+* **Exemplo:** Se o usuário disser "vamos alterar o projeto Pega-Pega", você DEVE perguntar: "Claro! O que você gostaria de mudar no projeto 'Pega-Pega' (nome, situação, prazo, etc.)?"
+* **NÃO** pergunte pelo ID se o nome já foi dado. A ferramenta encontrará pelo nome.
 
 (O resto das regras de update_project, update_task e DADOS DE CONTEXTO permanecem iguais)
 ====================================================================
@@ -774,17 +777,37 @@ def count_projects_by_status(status: str) -> int:
         print(f"Erro ao contar projetos por status: {e}")
         return -1
     
-async def update_project(pid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
+async def update_project(
+    patch: Dict[str, Any],
+    project_id: Optional[str] = None, 
+    project_name: Optional[str] = None,
+    user_id: Optional[str] = None
+) -> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
+        resolved_pid = project_id
+        if not resolved_pid and project_name:
+            resolved_pid = await find_project_id_by_name(client, project_name)
+        
+        if not resolved_pid:
+            raise ValueError(f"Projeto '{project_name or project_id}' não encontrado ou ID/Nome não fornecido.")
+
         auth_headers = await get_api_auth_headers(client, use_json=True)
-        allowed = {"nome", "descricao", "categoria", "situacao", "prazo", "responsavel_id"}
+        
+        allowed = {"nome", "descricao", "categoria", "situacao"}
         payload = {k: v for k, v in patch.items() if k in allowed and v is not None}
-        if not payload: raise ValueError("patch vazio")
-        url = f"{TASKS_API_BASE}/projetos/{pid}" 
+
+        if "prazo" in patch and patch["prazo"]:
+            payload["prazo"] = _parse_date_robust(patch["prazo"])
+        
+        if "responsavel" in patch and patch["responsavel"]:
+            resp_id = await resolve_responsavel_id(client, patch["responsavel"], default_user_id=user_id)
+            payload["responsavel_id"] = resp_id
+
+        if not payload: raise ValueError("Nenhum campo válido para atualizar ('patch' vazio).")
+        
+        url = f"{TASKS_API_BASE}/projetos/{resolved_pid}" 
         resp = await client.put(url, json=payload, headers=auth_headers)
         resp.raise_for_status(); return resp.json()
-
-# Em main.py, substitua a função (aprox. linha 725)
 
 async def create_project(doc: Dict[str, Any], user_id: Optional[str] = None) -> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
@@ -978,7 +1001,6 @@ async def import_project_from_url_tool(
         file_bytes=None
     )
 
-# --- CORREÇÃO: 'toolset()' atualizado ---
 def toolset() -> Tool:
     fns = [
         FunctionDeclaration(name="count_all_projects", description="Conta e retorna o número total de projetos.", parameters={"type": "object", "properties": {}}),
@@ -991,7 +1013,7 @@ def toolset() -> Tool:
         FunctionDeclaration(name="list_projects_by_status", description="Lista projetos por status (ex: 'em andamento').", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
         FunctionDeclaration(name="count_my_projects", description="Conta quantos projetos são de responsabilidade do usuário ATUAL.", parameters={"type": "object", "properties": {}}),
         FunctionDeclaration(name="list_my_projects", description="Lista os projetos de responsabilidade do usuário ATUAL.", parameters={"type": "object", "properties": {}}),
-        FunctionDeclaration(name="update_project", description="Atualiza campos de um projeto.", parameters={"type": "object", "properties": {"project_id": {"type": "string"}, "patch": {"type": "object", "properties": {"nome": {"type": "string"}, "situacao": {"type": "string"}, "prazo": {"type": "string"}}}}, "required": ["project_id", "patch"]}),
+        FunctionDeclaration(name="update_project", description="Atualiza campos de um projeto.", parameters={"type": "object", "properties": {"project_id": {"type": "string"}, "patch": {"type": "object", "properties": {"nome": {"type": "string"}, "situacao": {"type": "string"}, "prazo": {"type": "string"}}}}, "required": ["project_id", "patch"]}),        
         FunctionDeclaration(name="create_project", description="Cria um novo projeto.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "responsavel": {"type": "string"}, "situacao": {"type": "string"}, "prazo": {"type": "string"}}, "required": ["nome", "responsavel", "situacao", "prazo"]}),
         FunctionDeclaration(name="create_task", description="Cria uma nova tarefa.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "projeto_id": {"type": "string"}, "responsavel_id": {"type": "string"}, "prazo": {"type": "string"}, "status": {"type": "string"}}, "required": ["nome", "projeto_id", "responsavel_id", "prazo", "status"]}),
         FunctionDeclaration(name="update_task", description="Atualiza campos de uma tarefa.", parameters={"type": "object", "properties": {"task_id": {"type": "string"}, "patch": {"type": "object", "properties": {"nome": {"type": "string"}, "status": {"type": "string"}, "prazo": {"type": "string"}, "responsavel_id": {"type": "string"}}}}, "required": ["task_id", "patch"]}),
@@ -1021,7 +1043,7 @@ async def exec_tool(name: str, args: Dict[str, Any], user_id: Optional[str] = No
         if name == "find_project_responsavel": return {"ok": True, "data": find_project_responsavel(args["project_name"])}
         if name == "count_tasks_in_project": return {"ok": True, "data": count_tasks_in_project(args["project_name"])}
         if name == "list_tasks_by_project_name": return {"ok": True, "data": list_tasks_by_project_name(args["project_name"], args.get("top_k", 10))}
-        if name == "update_project": return {"ok": True, "data": await update_project(args["project_id"], args.get("patch", {}))}
+        if name == "update_project": return {"ok": True, "data": await update_project(patch=args.get("patch", {}), project_id=args.get("project_id"), project_name=args.get("project_name"), user_id=user_id)}              
         if name == "create_project": return {"ok": True, "data": await create_project(args, user_id=user_id)}
         if name == "create_task": return {"ok": True, "data": await create_task(args)}
         if name == "update_task": return {"ok": True, "data": await update_task(args["task_id"], args.get("patch", {}))}
