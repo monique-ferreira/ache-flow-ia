@@ -537,10 +537,6 @@ async def tasks_from_xlsx_logic(
 # =========================
 # Lógica da IA (do vertex_ai_service.py)
 # =========================
-# Em main.py, substitua a variável SYSTEM_PROMPT
-
-# Em main.py (Cloud Run - Serviço da IA)
-
 SYSTEM_PROMPT = """
 Você é o "Ache", um assistente de produtividade virtual da plataforma Ache Flow.
 Sua missão é ajudar colaboradores(as) como {nome_usuario} (email: {email_usuario}, id: {id_usuario}) a entender e gerenciar tarefas, projetos e prazos.
@@ -548,7 +544,16 @@ Sua missão é ajudar colaboradores(as) como {nome_usuario} (email: {email_usuar
 ====================================================================
 REGRAS DE RESPOSTA (MAIS IMPORTANTE)
 ====================================================================
+# Em main.py, substitua a REGRA 1 no SYSTEM_PROMPT por esta:
+
 1.  **REGRA DE FERRAMENTAS (PRIORIDADE 1):** Sua prioridade MÁXIMA é usar ferramentas. Se a pergunta for sobre 'projetos', 'tarefas', 'prazos', 'funcionários', 'criar', 'listar', 'contar', 'atualizar' ou 'importar', você DEVE usar as ferramentas.
+    * **Exemplos de Mapeamento:**
+        * "quantos projetos?" -> `count_all_projects`
+        * "quantos projetos em andamento?" -> `count_projects_by_status('em andamento')`
+        * "liste as tarefas concluídas" -> `list_tasks_by_status('concluída')`
+        * "quantas tarefas não iniciadas?" -> `count_tasks_by_status('não iniciada')`
+        * "quem é o responsável pelo Projeto X?" -> `find_project_responsavel('Projeto X')`
+        * "quantas tarefas há no Projeto Y?" -> `count_tasks_in_project('Projeto Y')`
     * NUNCA pergunte "Posso buscar?". Apenas execute a ferramenta e retorne a resposta.
     * Sempre que usar uma ferramenta, resuma o resultado em português claro. NUNCA mostre nomes de funções (como 'list_all_projects') ou código.
 
@@ -649,8 +654,6 @@ def count_all_projects() -> int:
         print(f"Erro ao contar projetos: {e}")
         return -1
 
-# Em main.py, substitua a função de contagem por esta:
-
 def count_projects_by_status(status: str) -> int:
     """Conta projetos com base em um status (ex: 'em andamento')."""
     status_norm = (status or "").strip()
@@ -674,7 +677,7 @@ async def update_project(pid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
         url = f"{TASKS_API_BASE}/projetos/{pid}" 
         resp = await client.put(url, json=payload, headers=auth_headers)
         resp.raise_for_status(); return resp.json()
-# Substitua a função original 'create_project' por esta:
+
 async def create_project(doc: Dict[str, Any]) -> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
         data = pick(doc, ["nome", "situacao", "prazo", "descricao", "categoria"])
@@ -700,6 +703,72 @@ async def update_task(tid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
         url = f"{TASKS_API_BASE}/tarefas/{tid}" 
         resp = await client.put(url, json=payload, headers=auth_headers)
         resp.raise_for_status(); return resp.json()
+
+def list_tasks_by_status(status: str, top_k: int = 50) -> List[Dict[str, Any]]:
+    """Lista tarefas com base em um status exato (ex: 'não iniciada', 'concluída')."""
+    status_norm = (status or "").strip()
+    if not status_norm:
+        return []
+    
+    rx = {"$regex": f"^{re.escape(status_norm)}$", "$options": "i"}
+    
+    employee_map = _get_employee_map()
+    tasks_raw = mongo()[COLL_TAREFAS].find({"status": rx}).sort("prazo", 1).limit(top_k)
+    tasks_clean = [sanitize_doc(t) for t in tasks_raw]
+    return [_enrich_doc_with_responsavel(t, employee_map) for t in tasks_clean]
+
+def count_tasks_by_status(status: str) -> int:
+    """Conta tarefas com base em um status exato (ex: 'não iniciada', 'concluída')."""
+    status_norm = (status or "").strip()
+    if not status_norm:
+        return 0
+    
+    rx = {"$regex": f"^{re.escape(status_norm)}$", "$options": "i"}
+    
+    try:
+        return mongo()[COLL_TAREFAS].count_documents({"status": rx})
+    except Exception as e:
+        print(f"Erro ao contar tarefas por status: {e}")
+        return -1
+
+def find_project_responsavel(project_name: str) -> str:
+    """Encontra o nome do responsável por um projeto específico."""
+    project_name_norm = (project_name or "").strip()
+    if not project_name_norm:
+        return "Nome do projeto não fornecido."
+
+    rx = {"$regex": f"^{re.escape(project_name_norm)}$", "$options": "i"}
+    proj = mongo()[COLL_PROJETOS].find_one({"nome": rx})
+    
+    if not proj:
+        return f"Projeto '{project_name_norm}' não encontrado."
+
+    proj_clean = sanitize_doc(proj)
+    
+    employee_map = _get_employee_map()
+    enriched_proj = _enrich_doc_with_responsavel(proj_clean, employee_map) 
+    
+    return enriched_proj.get("responsavel_nome", "(Responsável não definido)")
+
+def count_tasks_in_project(project_name: str) -> int:
+    """Conta o número de tarefas associadas a um projeto específico."""
+    project_name_norm = (project_name or "").strip()
+    if not project_name_norm:
+        return -1
+
+    try:
+        rx_proj = {"$regex": f"^{re.escape(project_name_norm)}$", "$options": "i"}
+        proj = mongo()[COLL_PROJETOS].find_one({"nome": rx_proj}, {"_id": 1})
+        
+        if not proj:
+            return -2
+
+        project_id = proj.get("_id")
+        
+        return mongo()[COLL_TAREFAS].count_documents({"projeto_id": project_id})
+    except Exception as e:
+        print(f"Erro ao contar tarefas no projeto: {e}")
+        return -3
 async def import_project_from_url_tool(
     xlsx_url: str, 
     projeto_nome: str, 
@@ -731,8 +800,13 @@ def toolset() -> Tool:
         FunctionDeclaration(name="create_task", description="Cria uma nova tarefa.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "projeto_id": {"type": "string"}, "responsavel_id": {"type": "string"}, "data_fim": {"type": "string"}, "data_inicio": {"type": "string"}, "status": {"type": "string"}}, "required": ["nome", "projeto_id", "responsavel_id", "data_fim", "data_inicio", "status"]}),
         FunctionDeclaration(name="update_task", description="Atualiza campos de uma tarefa.", parameters={"type": "object", "properties": {"task_id": {"type": "string"}, "patch": {"type": "object", "properties": {"nome": {"type": "string"}, "status": {"type": "string"}, "data_fim": {"type": "string"}, "responsavel_id": {"type": "string"}}}}, "required": ["task_id", "patch"]}),
         FunctionDeclaration(name="import_project_from_url", description="Cria um projeto e importa tarefas a partir de uma URL de arquivo .xlsx.", parameters={"type": "object", "properties": {"xlsx_url": {"type": "string"}, "projeto_nome": {"type": "string"}, "projeto_situacao": {"type": "string"}, "projeto_prazo": {"type": "string"}, "projeto_responsavel": {"type": "string"}, "projeto_descricao": {"type": "string"}, "projeto_categoria": {"type": "string"}}, "required": ["xlsx_url", "projeto_nome", "projeto_situacao", "projeto_prazo", "projeto_responsavel"]}),
+        FunctionDeclaration(name="list_tasks_by_status", description="Lista tarefas com base em um status exato (ex: 'não iniciada', 'concluída').", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
+        FunctionDeclaration(name="count_tasks_by_status", description="Conta tarefas com base em um status exato (ex: 'não iniciada', 'concluída').", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
+        FunctionDeclaration(name="find_project_responsavel", description="Encontra o nome do responsável por um projeto (busca por nome exato).", parameters={"type": "object", "properties": {"project_name": {"type": "string"}}, "required": ["project_name"]}),
+        FunctionDeclaration(name="count_tasks_in_project", description="Conta o número de tarefas em um projeto (busca por nome exato).", parameters={"type": "object", "properties": {"project_name": {"type": "string"}}, "required": ["project_name"]}),
     ]
     return Tool(function_declarations=fns)
+
 async def exec_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     try:
         if name == "count_all_projects": return {"ok": True, "data": count_all_projects()}
@@ -743,6 +817,10 @@ async def exec_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         if name == "list_tasks_by_deadline_range": return {"ok": True, "data": list_tasks_by_deadline_range(args["start"], args["end"], args.get("top_k", 50))}
         if name == "upcoming_deadlines": return {"ok": True, "data": upcoming_deadlines(args.get("days", 14), args.get("top_k", 50))}
         if name == "list_projects_by_status": return {"ok": True, "data": list_projects_by_status(args["status"], args.get("top_k", 50))}
+        if name == "list_tasks_by_status": return {"ok": True, "data": list_tasks_by_status(args["status"], args.get("top_k", 50))}
+        if name == "count_tasks_by_status": return {"ok": True, "data": count_tasks_by_status(args["status"])}
+        if name == "find_project_responsavel": return {"ok": True, "data": find_project_responsavel(args["project_name"])}
+        if name == "count_tasks_in_project": return {"ok": True, "data": count_tasks_in_project(args["project_name"])}
         if name == "update_project": return {"ok": True, "data": await update_project(args["project_id"], args.get("patch", {}))}
         if name == "create_project": return {"ok": True, "data": await create_project(args)}
         if name == "create_task": return {"ok": True, "data": await create_task(args)}
