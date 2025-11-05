@@ -59,16 +59,11 @@ GEMINI_MODEL_ID = os.getenv("GEMINI_MODEL_ID", "gemini-2.0-flash")
 
 API_KEY = os.getenv("API_KEY") 
 
-# --- REMOVIDO: NÃO VAMOS MAIS USAR MONGO DIRETAMENTE ---
-
 TASKS_API_BASE           = os.getenv("TASKS_API_BASE", "https://ache-flow-back.onrender.com").rstrip("/")
 TASKS_API_PROJECTS_PATH  = os.getenv("TASKS_API_PROJECTS_PATH", "/projetos")
 TASKS_API_TASKS_PATH     = os.getenv("TASKS_API_TASKS_PATH", "/tarefas")
-# --- REMOVIDO: NÃO VAMOS MAIS USAR LOGIN DE SERVIÇO ---
-# TASKS_API_TOKEN_PATH     = os.getenv("TASKS_API_TOKEN_PATH", "/token")
-# TASKS_API_USERNAME       = os.getenv("TASKS_API_USERNAME")
-# TASKS_API_PASSWORD       = os.getenv("TASKS_API_PASSWORD")
-ACHEFLOW_MAIN_API_TOKEN = os.getenv("ACHEFLOW_API_TOKEN") # Mantido para importação
+# Token de admin (ou um token de usuário válido) para a rota de importação /tasks/from-xlsx
+ACHEFLOW_MAIN_API_TOKEN = os.getenv("ACHEFLOW_API_TOKEN") 
 
 TIMEOUT_S = int(os.getenv("TIMEOUT_S", "90"))
 GENERIC_USER_AGENT = os.getenv("GENERIC_USER_AGENT", "ache-flow-ia/1.0 (+https://tistto.com.br)")
@@ -80,7 +75,7 @@ DEFAULT_TOP_K = 8
 # =========================
 # FastAPI App (Único)
 # =========================
-app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="2.0.7") # Versão API-Only Corrigida
+app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="2.0.8") # Versão API-Only Corrigida
 
 # === ADICIONADO BLOCO CORS ===
 origins = [
@@ -168,15 +163,12 @@ def sanitize_doc(data: Any) -> Any:
     if isinstance(data, DBRef):
         return str(data.id)
     
-    # --- NOVO: Se for um dicionário (dict), chama a função recursivamente para cada valor ---
     if isinstance(data, dict):
         return {k: sanitize_doc(v) for k, v in data.items()}
     
-    # --- NOVO: Se for uma lista (list), chama a função recursivamente para cada item ---
     if isinstance(data, list):
         return [sanitize_doc(item) for item in data]
     
-    # Se for qualquer outro tipo (int, str, bool, None), retorna como está
     return data
 
 # === INÍCIO DAS NOVAS FUNÇÕES HELPER ===
@@ -311,7 +303,7 @@ def xlsx_bytes_to_dataframe_preserving_hyperlinks(xlsx_bytes: bytes) -> pd.DataF
             if i == col_idx_doc:
                 url = (getattr(cell.hyperlink, "target", None) if getattr(cell, "hyperlink", None) else None) or hyperlink_map.get(cell.coordinate)
                 
-                # --- INÍCIO DA CORREÇÃO (LINHA 333) ---
+                # --- CORREÇÃO DE SINTAXE (LINHA 333) ---
                 if not url and isinstance(val, str) and val.strip().lower().startswith(("http://", "https://")): url = val.strip()
                 # --- FIM DA CORREÇÃO ---
                 
@@ -319,12 +311,6 @@ def xlsx_bytes_to_dataframe_preserving_hyperlinks(xlsx_bytes: bytes) -> pd.DataF
             else: record[header] = val if val is not None else ""
         rows.append(record)
     return pd.DataFrame(rows)
-
-# =========================
-# Auth (Falar com API Render)
-# =========================
-# --- REMOVIDO: 'get_auth_header' e 'get_api_auth_headers' ---
-# A autenticação agora é passada por chamada
 
 # =========================
 # Lógica de Importação (do ai_api.py)
@@ -404,27 +390,6 @@ async def resolve_responsavel_id(client: httpx.AsyncClient, token: str, user_id:
     # Fallback: Se não achou NINGUÉM, retorna o ID do usuário logado
     return user_id
 
-# --- LÓGICA DE IMPORTAÇÃO (Omitida por brevidade, está correta) ---
-def duration_to_date(duracao: Optional[str]) -> str:
-    base = datetime.utcnow().date()
-    try:
-        s = (duracao or "").strip().lower(); m = re.search(r"(\d+)", s)
-        n = int(m.group(1)) if m else 7
-    except Exception: n = 7
-    return (base + timedelta(days=n)).isoformat()
-def resolve_descricao_pdf(row) -> str:
-    como, docrf = str(row.get("Como Fazer") or "").strip(), str(row.get("Documento Referência") or "").strip()
-    if not como or not docrf or not re.search(r"(?i)\b((?:Doc\.?\s*)?(Texto\.?\d+))\b\.?", como): return como
-    try: 
-        pdf_bytes = fetch_pdf_bytes(docrf)
-    except Exception: 
-        return como
-    def _repl(m: re.Match) -> str:
-        full_token, anchor = m.group(1), m.group(2)
-        extracted = clean_pdf_text(extract_after_anchor_from_pdf(pdf_bytes, anchor))
-        return extracted if extracted else full_token
-    return re.sub(r"(?i)\b((?:Doc\.?\s*)?(Texto\.?\d+))\b\.?", _repl, como)
-
 # --- CORREÇÃO: tasks_from_xlsx_logic agora precisa do token e user_id ---
 async def tasks_from_xlsx_logic(
     token: str, # Token do usuário
@@ -480,7 +445,6 @@ async def tasks_from_xlsx_logic(
     if not projeto_id and not projeto_nome:
         raise HTTPException(status_code=400, detail={"erro": "Para importar, forneça 'projeto_id' ou 'projeto_nome'."})
     
-    # Esta função é a única que cria seu próprio client, pois é chamada por duas rotas
     async with httpx.AsyncClient() as client:
         # USA O TOKEN DO USUÁRIO
         auth_headers = {"Authorization": token, "Content-Type": "application/json"}
@@ -679,10 +643,15 @@ async def count_projects_by_status(client: httpx.AsyncClient, token: str, status
         print(f"Erro ao contar projetos por status: {e}")
         return -1
 
-async def update_project(client: httpx.AsyncClient, token: str, pid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
+async def update_project(client: httpx.AsyncClient, token: str, user_id: str, pid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
     auth_headers = {"Authorization": token, "Content-Type": "application/json"}
     allowed = {"nome", "descricao", "categoria", "situacao", "prazo", "responsavel_id"}
     payload = {k: v for k, v in patch.items() if k in allowed and v is not None}
+    
+    # Resolve 'responsavel' se for passado
+    if "responsavel" in patch:
+        payload["responsavel_id"] = await resolve_responsavel_id(client, token, user_id, patch["responsavel"])
+
     if not payload: raise ValueError("patch vazio")
     url = f"{TASKS_API_BASE}/projetos/{pid}" 
     resp = await client.put(url, json=payload, headers=auth_headers)
@@ -721,18 +690,23 @@ async def create_task(client: httpx.AsyncClient, token: str, user_id: str, doc: 
     
     return await create_task_api(client, data, token)
     
-async def update_task(client: httpx.AsyncClient, token: str, tid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
+async def update_task(client: httpx.AsyncClient, token: str, user_id: str, tid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
     auth_headers = {"Authorization": token, "Content-Type": "application/json"}
     allowed = {"nome", "descricao", "prioridade", "status", "data_inicio", "data_fim", "responsavel_id", "projeto_id"}
     payload = {k: v for k, v in patch.items() if k in allowed and v is not None}
+    
+    # Resolve 'responsavel' se for passado
+    if "responsavel" in patch:
+        payload["responsavel_id"] = await resolve_responsavel_id(client, token, user_id, patch["responsavel"])
+
     if not payload: raise ValueError("patch vazio")
     url = f"{TASKS_API_BASE}/tarefas/{tid}" 
     resp = await client.put(url, json=payload, headers=auth_headers)
     resp.raise_for_status(); return resp.json()
 
 async def import_project_from_url_tool(
-    token: str, # Adicionado
-    user_id: str, # Adicionado
+    token: str,
+    user_id: str,
     xlsx_url: str, 
     projeto_nome: str, 
     projeto_situacao: str, 
@@ -742,8 +716,8 @@ async def import_project_from_url_tool(
     projeto_categoria: Optional[str] = None
 ) -> Dict[str, Any]:
     return await tasks_from_xlsx_logic(
-        token=token, # Passado
-        user_id=user_id, # Passado
+        token=token,
+        user_id=user_id,
         projeto_id=None, projeto_nome=projeto_nome,
         create_project_flag=1, projeto_situacao=projeto_situacao,
         projeto_prazo=projeto_prazo, projeto_responsavel=projeto_responsavel,
@@ -763,10 +737,14 @@ def toolset() -> Tool:
         FunctionDeclaration(name="list_tasks_by_deadline_range", description="Lista tarefas com prazo entre datas (YYYY-MM-DD).", parameters={"type": "object", "properties": {"start": {"type": "string"}, "end": {"type": "string"}}, "required": ["start", "end"]}),
         FunctionDeclaration(name="upcoming_deadlines", description="Lista tarefas com prazo vencendo nos próximos X dias.", parameters={"type": "object", "properties": {"days": {"type": "integer"}}, "required": ["days"]}),
         FunctionDeclaration(name="list_projects_by_status", description="Lista projetos por status. Use 'em andamento' para status como 'ativo', 'desenvolvimento', 'em progresso', etc.", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
-        FunctionDeclaration(name="update_project", description="Atualiza campos de um projeto.", parameters={"type": "object", "properties": {"project_id": {"type": "string"}, "patch": {"type": "object", "properties": {"nome": {"type": "string"}, "situacao": {"type": "string"}, "prazo": {"type": "string"}}}}, "required": ["project_id", "patch"]}),
+        
+        # --- CORREÇÃO: update_project/task agora aceita 'responsavel' (string) ---
+        FunctionDeclaration(name="update_project", description="Atualiza campos de um projeto.", parameters={"type": "object", "properties": {"project_id": {"type": "string"}, "patch": {"type": "object", "properties": {"nome": {"type": "string"}, "situacao": {"type": "string"}, "prazo": {"type": "string"}, "responsavel": {"type": "string"}}}}, "required": ["project_id", "patch"]}),
         FunctionDeclaration(name="create_project", description="Cria um novo projeto.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "responsavel": {"type": "string"}, "situacao": {"type": "string"}, "prazo": {"type": "string"}}, "required": ["nome", "responsavel", "situacao", "prazo"]}),
         FunctionDeclaration(name="create_task", description="Cria uma nova tarefa.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "projeto_id": {"type": "string"}, "responsavel": {"type": "string"}, "data_fim": {"type": "string"}, "data_inicio": {"type": "string"}, "status": {"type": "string"}}, "required": ["nome", "projeto_id", "responsavel", "data_fim", "data_inicio", "status"]}),
-        FunctionDeclaration(name="update_task", description="Atualiza campos de uma tarefa.", parameters={"type": "object", "properties": {"task_id": {"type": "string"}, "patch": {"type": "object", "properties": {"nome": {"type": "string"}, "status": {"type": "string"}, "data_fim": {"type": "string"}, "responsavel_id": {"type": "string"}}}}, "required": ["task_id", "patch"]}),
+        FunctionDeclaration(name="update_task", description="Atualiza campos de uma tarefa.", parameters={"type": "object", "properties": {"task_id": {"type": "string"}, "patch": {"type": "object", "properties": {"nome": {"type": "string"}, "status": {"type": "string"}, "data_fim": {"type": "string"}, "responsavel": {"type": "string"}}}}, "required": ["task_id", "patch"]}),
+        # --- FIM DA CORREÇÃO ---
+
         FunctionDeclaration(name="import_project_from_url", description="Cria um projeto e importa tarefas a partir de uma URL de arquivo .xlsx.", parameters={"type": "object", "properties": {"xlsx_url": {"type": "string"}, "projeto_nome": {"type": "string"}, "projeto_situacao": {"type": "string"}, "projeto_prazo": {"type": "string"}, "projeto_responsavel": {"type": "string"}, "projeto_descricao": {"type": "string"}, "projeto_categoria": {"type": "string"}}, "required": ["xlsx_url", "projeto_nome", "projeto_situacao", "projeto_prazo", "projeto_responsavel"]}),
     ]
     return Tool(function_declarations=fns)
@@ -784,13 +762,12 @@ async def exec_tool(client: httpx.AsyncClient, token: str, user_id: str, name: s
         if name == "upcoming_deadlines": return {"ok": True, "data": await upcoming_deadlines(client, token, args.get("days", 14), args.get("top_k", 50))}
         if name == "list_projects_by_status": return {"ok": True, "data": await list_projects_by_status(client, token, args["status"], args.get("top_k", 50))}
         
-        if name == "update_project": return {"ok": True, "data": await update_project(client, token, args["project_id"], args.get("patch", {}))}
+        if name == "update_project": return {"ok": True, "data": await update_project(client, token, user_id, args["project_id"], args.get("patch", {}))}
         if name == "create_project": return {"ok": True, "data": await create_project(client, token, user_id, args)}
         if name == "create_task": return {"ok": True, "data": await create_task(client, token, user_id, args)}
-        if name == "update_task": return {"ok": True, "data": await update_task(client, token, args["task_id"], args.get("patch", {}))}
+        if name == "update_task": return {"ok": True, "data": await update_task(client, token, user_id, args["task_id"], args.get("patch", {}))}
         
         if name == "import_project_from_url": 
-            # Passa o token e user_id
             return {"ok": True, "data": await import_project_from_url_tool(token=token, user_id=user_id, **args)}
         
         return {"ok": False, "error": f"função desconhecida: {name}"}
@@ -810,7 +787,7 @@ def _normalize_answer(raw: str, nome_usuario: str) -> str:
     if all(sym not in raw for sym in ("🙂", "😊", "👋")):
         raw = raw.rstrip(".") + " 🙂"
     
-    # --- CORREÇÃO DE FORMATAÇÃO: Substitui o marcador '\\n' por quebras de linha reais ---
+    # --- CORREÇÃO DE FORMATAÇÃO: Substitui o marcador '\n' por quebras de linha reais ---
     raw = raw.replace(r'\n', '\n')
     # --- FIM DA CORREÇÃO ---
     return raw
@@ -820,7 +797,7 @@ def init_model(system_instruction: str) -> GenerativeModel:
     return GenerativeModel(GEMINI_MODEL_ID, system_instruction=system_instruction)
 
 async def chat_with_tools(
-    token: str, # Token do usuário
+    token: str, # Token do usuário (COM "Bearer ")
     user_msg: str, 
     history: Optional[List[HistoryMessage]] = None, 
     nome_usuario: Optional[str] = None, 
@@ -896,11 +873,13 @@ async def ai_chat(
     if not authorization:
         raise HTTPException(status_code=401, detail="Token de autorização ausente")
         
-    # Remove o "Bearer "
-    token = authorization.replace("Bearer ", "")
+    # --- CORREÇÃO: LINHA 872 ---
+    # NÃO REMOVE MAIS O "Bearer ", passa o cabeçalho inteiro.
+    token = authorization
+    # --- FIM DA CORREÇÃO ---
 
     out = await chat_with_tools(
-        token=token, # Passa o token do usuário
+        token=token, # Passa o token do usuário (ex: "Bearer 123...")
         user_msg=req.pergunta, 
         history=req.history, 
         nome_usuario=req.nome_usuario,
@@ -917,7 +896,8 @@ async def ai_chat(
 @app.post("/tasks/from-xlsx")
 async def tasks_from_xlsx(
     authorization: Optional[str] = Header(None), # Recebe o token do usuário
-    _=Depends(require_api_key), 
+    x_api_key: Optional[str] = Header(None), # Recebe a API Key
+    _=Depends(require_api_key), # Valida a x-api-key
     projeto_id: Optional[str] = Form(None),
     projeto_nome: Optional[str] = Form(None),
     create_project_flag: int = Form(0),
@@ -929,36 +909,43 @@ async def tasks_from_xlsx(
     xlsx_url: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None)
 ):
+    # Esta rota é chamada pelo frontend (IAche/index.tsx)
+    # Precisamos do token do usuário para a lógica de 'resolve_responsavel_id'
+    
     if not authorization:
-        raise HTTPException(status_code=401, detail="Token de autorização ausente")
-    token = authorization.replace("Bearer ", "")
+        raise HTTPException(status_code=401, detail="Token de autorização de usuário ausente")
+    token = authorization # Inclui "Bearer "
     
-    # --- Pega o user_id do token ---
-    # Esta é uma gambiarra; o ideal seria validar o token
-    # Mas vamos usar o 'id_usuario' que o frontend *deveria* enviar
-    # ... Ah, o frontend não envia 'id_usuario' nesta rota.
-    # Vamos ter que usar a autenticação de serviço SÓ AQUI.
+    # --- CORREÇÃO: Precisamos extrair o user_id do token ---
+    # Esta é a parte mais complexa. A API do Render tem a lógica
+    # para decodificar o token. Este serviço de IA não tem.
+    # A SOLUÇÃO CORRETA é o frontend enviar o user_id no form-data.
+    # Mas, como não temos isso, vamos usar o token do ACHEFLOW_MAIN_API_TOKEN
+    # se o 'projeto_responsavel' for "eu".
     
-    # --- RE-CORREÇÃO: A rota /tasks/from-xlsx usa x-api-key, ---
-    # --- mas a lógica 'tasks_from_xlsx_logic' precisa de um token de *usuário*.
-    # --- Isso é um problema. O 'ACHEFLOW_MAIN_API_TOKEN' é a melhor aposta.
+    user_id_para_importacao = "id_generico" # Fallback
+    usando_token_de_servico = False
     
-    user_token_for_import = ACHEFLOW_MAIN_API_TOKEN
-    user_id_for_import = "service_account" # ID Fixo, já que não temos o do usuário
-    
-    # Se o token do ACHEFLOW não estiver definido, tentaremos usar o token de usuário
-    # que o 'IAche' (frontend) envia, mas não é o ideal.
-    if not user_token_for_import and token:
-         user_token_for_import = token
-         # Não temos o ID, então 'resolve_responsavel_id' vai falhar para "eu"
-    
-    if not user_token_for_import:
-         raise HTTPException(status_code=401, detail="Nenhum token de serviço (ACHEFLOW_MAIN_API_TOKEN) configurado para importação.")
+    if projeto_responsavel and projeto_responsavel.lower() in ["eu", "eu mesmo", "me", "para mim", "eu sou responsável", "sou eu"]:
+        if not ACHEFLOW_MAIN_API_TOKEN:
+             raise HTTPException(status_code=500, detail="ACHEFLOW_MAIN_API_TOKEN não está configurado. Não consigo resolver 'eu sou o responsável'.")
+        
+        # Se o responsável for "eu", usamos o token de admin
+        token_para_importacao = f"Bearer {ACHEFLOW_MAIN_API_TOKEN}"
+        
+    token_para_importacao = authorization
+    user_id_para_importacao = "" # Não sabemos o ID do usuário
+
+    # Se um token de serviço (admin) estiver disponível, use-o.
+    # Isso dá à importação mais privilégios.
+    if ACHEFLOW_MAIN_API_TOKEN:
+        token_para_importacao = f"Bearer {ACHEFLOW_MAIN_API_TOKEN}"
+        user_id_para_importacao = "service_account_admin" # ID Fixo
 
     file_bytes = await file.read() if file else None
     result = await tasks_from_xlsx_logic(
-        token=user_token_for_import,
-        user_id=user_id_for_import, 
+        token=token_para_importacao,
+        user_id=user_id_para_importacao, 
         projeto_id=projeto_id, 
         projeto_nome=projeto_nome,
         create_project_flag=create_project_flag, 
