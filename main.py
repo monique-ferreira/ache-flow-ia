@@ -403,9 +403,6 @@ def extract_hidden_message(raw_text: str) -> str:
     Encontra palavras com letras maiúsculas "fora do lugar" e
     extrai as letras maiúsculas de cada palavra, unindo-as com espaços
     para formar a frase secreta.
-    
-    Esta função processa o texto bruto para juntar palavras
-    quebradas por quebras de linha (ex: "contribuI\n ativamente").
     """
     if not raw_text:
         return ""
@@ -416,10 +413,10 @@ def extract_hidden_message(raw_text: str) -> str:
     text = re.sub(r"\s+", " ", text)
     
     words = text.split()
-    sentence_enders = ".!?"
+    sentence_enders = (".", "!", "?")
 
     for i, word in enumerate(words):
-        clean_word = word.rstrip(f",;:.\"'{sentence_enders}")
+        clean_word = word.rstrip(f",;:.\"'{''.join(sentence_enders)}")
         if not clean_word or len(clean_word) < 1:
             continue
 
@@ -439,9 +436,13 @@ def extract_hidden_message(raw_text: str) -> str:
             
             prev_word = words[i-1]
             
-            if any(prev_word.endswith(ender) for ender in sentence_enders):
+            if prev_word.endswith(sentence_enders):
                 continue
-                
+            
+            clean_prev_word = prev_word.rstrip(f",;:\"'{''.join(sentence_enders)}")
+            if clean_prev_word and clean_prev_word[-1] in sentence_enders:
+                continue
+
             first_cap = clean_word[0]
             secret_parts.append(first_cap)
 
@@ -1353,14 +1354,18 @@ async def ai_chat_with_pdf(
             call = resp.candidates[0].content.parts[0].function_call
             
             if call.name == "solve_pdf_enigma":
-                result = {"message": hidden_message or "Nenhuma mensagem encontrada."}
                 
-                contents.append(resp.candidates[0].content)
-                contents.append(Content(role="tool", parts=[Part.from_function_response(name=call.name, response=result)]))
+                message = hidden_message or "Nenhuma mensagem secreta encontrada."
                 
-                final_resp = model.generate_content(contents, tools=[pdf_tool])
-                resp = final_resp 
-        
+                final_answer = _normalize_answer(f"A frase secreta encontrada no arquivo é: {message}", nome_usuario_fmt)
+                
+                response_data = {
+                    "tipo_resposta": "TEXTO_PDF",
+                    "conteudo_texto": final_answer,
+                    "dados": []
+                }
+                return JSONResponse(response_data)
+
         final_text = ""
         if resp.candidates and resp.candidates[0].content and resp.candidates[0].content.parts:
             final_text = getattr(resp.candidates[0].content.parts[0], "text", "") or ""
@@ -1377,7 +1382,7 @@ async def ai_chat_with_pdf(
 
     except Exception as e:
         raise e
-            
+                
 @app.post("/pdf/extract-text")
 async def pdf_extract_text(file: UploadFile = File(...), _ = Depends(require_api_key)):
     """
