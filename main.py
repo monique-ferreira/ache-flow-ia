@@ -91,8 +91,8 @@ app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importaçã
 origins = [
     "http://localhost:5173", # Para desenvolvimento local
     "http://localhost:5174", # Outra porta local comum
-    "https://acheflow.web.app", # Exemplo de site no ar
-    "https://acheflow.firebaseapp.com" # Exemplo de site no ar
+    "https.acheflow.web.app", # Exemplo de site no ar
+    "https.acheflow.firebaseapp.com" # Exemplo de site no ar
 ]
 
 app.add_middleware(
@@ -411,14 +411,19 @@ async def create_project_api(client: httpx.AsyncClient, data: Dict[str, Any]) ->
     r = await client.post(url, json=payload, headers=auth_headers, timeout=TIMEOUT_S)
     r.raise_for_status()
     return r.json()
+
+# --- CORREÇÃO: Removido 'data_inicio' ---
 async def create_task_api(client: httpx.AsyncClient, data: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{TASKS_API_BASE}{TASKS_API_TASKS_PATH}"
     auth_headers = await get_api_auth_headers(client, use_json=True)
-    payload = pick(data, ["nome", "projeto_id", "responsavel_id", "descricao", "prioridade", "status", "data_inicio", "prazo", "documento_referencia", "concluido"])
+    # A API de destino (Render) não aceita 'data_inicio', apenas 'prazo'
+    payload = pick(data, ["nome", "projeto_id", "responsavel_id", "descricao", "prioridade", "status", "prazo", "documento_referencia", "concluido"])
     payload = {k: v for k, v in payload.items() if v is not None}
     r = await client.post(url, json=payload, headers=auth_headers, timeout=TIMEOUT_S)
     r.raise_for_status()
     return r.json()
+# --- FIM DA CORREÇÃO ---
+
 async def find_project_id_by_name(client: httpx.AsyncClient, projeto_nome: str) -> Optional[str]:
     url = f"{TASKS_API_BASE}{TASKS_API_PROJECTS_PATH}"
     auth_headers = await get_api_auth_headers(client, use_json=True)
@@ -496,9 +501,12 @@ def resolve_descricao_pdf(row) -> str:
         extracted = clean_pdf_text(extract_after_anchor_from_pdf(pdf_bytes, anchor))
         return extracted if extracted else full_token
     return re.sub(r"(?i)\b((?:Doc\.?\s*)?(Texto\.?\d+))\b\.?", _repl, como)
+
+# --- CORREÇÃO: Adicionado 'user_id' à definição da função ---
 async def tasks_from_xlsx_logic(
     projeto_id: Optional[str],
     projeto_nome: Optional[str],
+    user_id: Optional[str], # <-- CORREÇÃO: Recebe o ID do usuário logado
     create_project_flag: int,
     projeto_situacao: Optional[str],
     projeto_prazo: Optional[str],
@@ -553,7 +561,8 @@ async def tasks_from_xlsx_logic(
             resolved_project_id = await find_project_id_by_name(client, projeto_nome)
         if not resolved_project_id:
             if create_project_flag and projeto_nome:
-                proj_resp_id = await resolve_responsavel_id(client, projeto_responsavel)
+                # --- CORREÇÃO: Passa 'user_id' para 'resolve_responsavel_id' ---
+                proj_resp_id = await resolve_responsavel_id(client, projeto_responsavel, default_user_id=user_id)
                 proj_prazo = (projeto_prazo or "").strip()
                 if not proj_prazo:
                     proj_prazo = (latest_task_date or (today_date + timedelta(days=30))).isoformat()
@@ -567,12 +576,14 @@ async def tasks_from_xlsx_logic(
                 raise HTTPException(status_code=404, detail={"erro": f"Projeto '{projeto_nome}' não encontrado. Para criar, envie 'create_project_flag=1'."})
         created, errors = [], []
         for item in preview:
-            resp_id = await resolve_responsavel_id(client, item.get("responsavel"))
+            # --- CORREÇÃO: Passa 'user_id' para 'resolve_responsavel_id' ---
+            resp_id = await resolve_responsavel_id(client, item.get("responsavel"), default_user_id=user_id)
             try:
+                # --- CORREÇÃO: Removido 'data_inicio' ---
                 created.append(await create_task_api(client, {
                     "nome": item["titulo"], "descricao": item["descricao"],
                     "projeto_id": resolved_project_id, "responsavel_id": resp_id,
-                    "prazo": item["prazo"], "data_inicio": today_date.isoformat(),
+                    "prazo": item["prazo"],
                     "documento_referencia": item["doc_ref"],
                     "status": "não iniciada", "prioridade": "média"
                 }))
@@ -583,6 +594,8 @@ async def tasks_from_xlsx_logic(
 # =========================
 # Lógica da IA (do vertex_ai_service.py)
 # =========================
+
+# --- CORREÇÃO: SYSTEM_PROMPT ATUALIZADO ---
 SYSTEM_PROMPT = """
 Você é o "Ache", um assistente de produtividade virtual da plataforma Ache Flow.
 Sua missão é ajudar colaboradores(as) como {nome_usuario} (email: {email_usuario}, id: {id_usuario}) a entender e gerenciar tarefas, projetos e prazos.
@@ -609,6 +622,7 @@ REGRAS DE RESPOSTA (MAIS IMPORTANTE)
         * "quantas tarefas não iniciadas?" -> `count_tasks_by_status('não iniciada')`
         * "quem é o responsável pelo Projeto X?" -> `find_project_responsavel('Projeto X')`
         * "quantas tarefas há no Projeto Y?" -> `count_tasks_in_project('Projeto Y')`
+        * "liste as 10 tarefas do Projeto Y" -> `list_tasks_by_project_name('Projeto Y', 10)`
     * NUNCA pergunte "Posso buscar?". Apenas execute a ferramenta e retorne a resposta.
     * Sempre que usar uma ferramenta, resuma o resultado em português claro. NUNCA mostre nomes de funções (como 'list_all_projects') ou código.
 
@@ -630,21 +644,24 @@ REGRAS DE RESPOSTA (MAIS IMPORTANTE)
 ====================================================================
 REGRAS DE COLETA DE DADOS (PARA CRIAR/EDITAR)
 ====================================================================
-Muitas ferramentas precisam de vários argumentos. Você DEVE perguntar ao usuário pelas informações que faltam ANTES de chamar a ferramenta.
+Sua tarefa é preencher os argumentos para as ferramentas.
 
-**1. PARA: `import_project_from_url` (Importar XLSX de URL):**
-* **Se faltar:** `projeto_nome`, `projeto_situacao`, `projeto_prazo` (DD-MM-AAAA), ou `projeto_responsavel`.
-* **Pergunte:** "Claro! Para importar este projeto, preciso de alguns detalhes: Qual será o nome do projeto? Qual a situação dele (ex: Em andamento)? Qual o prazo final (DD-MM-AAAA)? E quem será o responsável (nome ou email)?"
+**REGRA PRINCIPAL:** Sempre tente extrair os parâmetros (como nome, prazo, etc.) da ÚLTIMA MENSAGEM DO USUÁRIO.
 
-**2. PARA: `create_project` (Criar Projeto ÚNICO):**
-* **Se faltar:** `nome`, `situacao`, `prazo` (DD-MM-AAAA), ou `responsavel`.
-* **Pergunte:** "Certo, vou criar o projeto. Me diga: Qual o nome? Qual a situação inicial (ex: Em planejamento)? Qual o prazo (DD-MM-AAAA)? E quem será o responsável (nome ou email)?"
+- **SE** você conseguir extrair TODOS os argumentos necessários da mensagem (ex: "criar projeto X, prazo Y, resp Z"):
+    - NÃO PERGUNTE NADA. Chame a ferramenta `create_project` imediatamente.
+- **SE** algum argumento estiver faltando (ex: "criar projeto X"):
+    - AÍ SIM, pergunte APENAS pelos argumentos que faltam (ex: "Claro! Qual o prazo e o responsável?").
 
-**3. PARA: `update_project` (Atualizar Projeto):**
+**1. PARA: `create_project` (Criar Projeto ÚNICO):**
+* **Argumentos necessários:** `nome`, `situacao`, `prazo` (DD-MM-AAAA), `responsavel` (nome ou email).
+* **Exemplo de falha:** O usuário diz "vamos criar um projeto". Você pergunta: "Certo, vou criar o projeto. Me diga: Qual o nome? Qual a situação inicial (ex: Em planejamento)? Qual o prazo (DD-MM-AAAA)? E quem será o responsável (nome ou email)? 🙂"
+
+**2. PARA: `update_project` (Atualizar Projeto):**
 * **Se faltar:** `pid` (ID do projeto) ou o `patch` (o que mudar).
 * **Pergunte:** "OK. Qual o NOME ou ID do projeto que você quer atualizar? E o que você gostaria de mudar (nome, situação, prazo)?"
 
-**4. PARA: `update_task` (Atualizar Tarefa):**
+**3. PARA: `update_task` (Atualizar Tarefa):**
 * **Se faltar:** `tid` (ID da tarefa) ou o `patch` (o que mudar).
 * **Pergunte:** "Entendido. Qual o NOME ou ID da tarefa que quer atualizar? E o que vamos alterar (nome, status, prazo)?"
 
@@ -656,6 +673,9 @@ DADOS DE CONTEXTO
 -   **Datas:** Hoje é {data_hoje}. "Este mês" vai de {inicio_mes} até {fim_mes}.
 -   **Formato de Data:** Sempre que pedir uma data, peça em **DD-MM-AAAA**. Você deve converter internamente para **AAAA-MM-DD** antes de usar nas ferramentas.
 """
+# === FIM DA CORREÇÃO DO SYSTEM_PROMPT ===
+
+
 # === INÍCIO DAS FUNÇÕES DE FERRAMENTA ATUALIZADAS ===
 
 def list_all_projects(top_k: int = 500) -> List[Dict[str, Any]]:
@@ -757,16 +777,19 @@ async def create_project(doc: Dict[str, Any], user_id: Optional[str] = None) -> 
         data["responsavel_id"] = resolved_id
         
         return await create_project_api(client, data)
-            
+
+# --- CORREÇÃO: Removido 'data_inicio' ---            
 async def create_task(doc: Dict[str, Any]) -> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
-        data = pick(doc, ["nome", "projeto_id", "responsavel_id", "descricao", "prioridade", "status", "data_inicio", "prazo", "documento_referencia", "concluido"])
+        data = pick(doc, ["nome", "projeto_id", "responsavel_id", "descricao", "prioridade", "status", "prazo", "documento_referencia", "concluido"])
         if not data.get("nome"): raise ValueError("nome é obrigatório")
         return await create_task_api(client, data)
+
+# --- CORREÇÃO: Removido 'data_inicio' ---
 async def update_task(tid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
         auth_headers = await get_api_auth_headers(client, use_json=True)
-        allowed = {"nome", "descricao", "prioridade", "status", "data_inicio", "prazo", "responsavel_id", "projeto_id"}
+        allowed = {"nome", "descricao", "prioridade", "status", "prazo", "responsavel_id", "projeto_id"}
         payload = {k: v for k, v in patch.items() if k in allowed and v is not None}
         if not payload: raise ValueError("patch vazio")
         url = f"{TASKS_API_BASE}/tarefas/{tid}" 
@@ -869,6 +892,37 @@ def list_projects_by_responsavel(responsavel_id_str: Optional[str], top_k: int =
         print(f"Erro ao listar projetos por responsável: {e}")
         return []
 
+# --- ADIÇÃO: Nova função 'list_tasks_by_project_name' ---
+def list_tasks_by_project_name(project_name: str, top_k: int = 10) -> List[Dict[str, Any]]:
+    """Lista as primeiras N tarefas de um projeto específico, buscando pelo nome do projeto."""
+    project_name_norm = (project_name or "").strip()
+    if not project_name_norm:
+        return []
+
+    try:
+        # 1. Encontrar o ID do projeto pelo nome
+        rx_proj = {"$regex": f"^{re.escape(project_name_norm)}$", "$options": "i"}
+        proj = mongo()[COLL_PROJETOS].find_one({"nome": rx_proj}, {"_id": 1})
+        
+        if not proj:
+            return [] # Projeto não encontrado, retorna lista vazia
+
+        project_id = proj.get("_id")
+        
+        # 2. Buscar tarefas que referenciam esse ObjectId
+        task_query = {"projeto": DBRef(collection=COLL_PROJETOS, id=project_id)}
+        
+        employee_map = _get_employee_map()
+        tasks_raw = mongo()[COLL_TAREFAS].find(task_query).sort("prazo", 1).limit(top_k)
+        tasks_clean = [sanitize_doc(t) for t in tasks_raw]
+        return [_enrich_doc_with_responsavel(t, employee_map) for t in tasks_clean]
+        
+    except Exception as e:
+        print(f"Erro ao listar tarefas do projeto: {e}")
+        return []
+# --- FIM DA ADIÇÃO ---
+
+
 async def import_project_from_url_tool(
     xlsx_url: str, 
     projeto_nome: str, 
@@ -880,11 +934,14 @@ async def import_project_from_url_tool(
 ) -> Dict[str, Any]:
     return await tasks_from_xlsx_logic(
         projeto_id=None, projeto_nome=projeto_nome,
+        user_id=None, # Import via tool usa o token padrão (ia-admin)
         create_project_flag=1, projeto_situacao=projeto_situacao,
         projeto_prazo=projeto_prazo, projeto_responsavel=projeto_responsavel,
         projeto_descricao=projeto_descricao, projeto_categoria=projeto_categoria,
         xlsx_url=xlsx_url, file_bytes=None
     )
+
+# --- CORREÇÃO: 'toolset()' atualizado ---
 def toolset() -> Tool:
     fns = [
         FunctionDeclaration(name="count_all_projects", description="Conta e retorna o número total de projetos.", parameters={"type": "object", "properties": {}}),
@@ -899,16 +956,21 @@ def toolset() -> Tool:
         FunctionDeclaration(name="list_my_projects", description="Lista os projetos de responsabilidade do usuário ATUAL.", parameters={"type": "object", "properties": {}}),
         FunctionDeclaration(name="update_project", description="Atualiza campos de um projeto.", parameters={"type": "object", "properties": {"project_id": {"type": "string"}, "patch": {"type": "object", "properties": {"nome": {"type": "string"}, "situacao": {"type": "string"}, "prazo": {"type": "string"}}}}, "required": ["project_id", "patch"]}),
         FunctionDeclaration(name="create_project", description="Cria um novo projeto.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "responsavel": {"type": "string"}, "situacao": {"type": "string"}, "prazo": {"type": "string"}}, "required": ["nome", "responsavel", "situacao", "prazo"]}),
-        FunctionDeclaration(name="create_task", description="Cria uma nova tarefa.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "projeto_id": {"type": "string"}, "responsavel_id": {"type": "string"}, "prazo": {"type": "string"}, "data_inicio": {"type": "string"}, "status": {"type": "string"}}, "required": ["nome", "projeto_id", "responsavel_id", "prazo", "data_inicio", "status"]}),
+        # --- CORREÇÃO: Removido 'data_inicio' de 'create_task' ---
+        FunctionDeclaration(name="create_task", description="Cria uma nova tarefa.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "projeto_id": {"type": "string"}, "responsavel_id": {"type": "string"}, "prazo": {"type": "string"}, "status": {"type": "string"}}, "required": ["nome", "projeto_id", "responsavel_id", "prazo", "status"]}),
+        # --- CORREÇÃO: Removido 'data_inicio' de 'update_task' ---
         FunctionDeclaration(name="update_task", description="Atualiza campos de uma tarefa.", parameters={"type": "object", "properties": {"task_id": {"type": "string"}, "patch": {"type": "object", "properties": {"nome": {"type": "string"}, "status": {"type": "string"}, "prazo": {"type": "string"}, "responsavel_id": {"type": "string"}}}}, "required": ["task_id", "patch"]}),
         FunctionDeclaration(name="import_project_from_url", description="Cria um projeto e importa tarefas a partir de uma URL de arquivo .xlsx.", parameters={"type": "object", "properties": {"xlsx_url": {"type": "string"}, "projeto_nome": {"type": "string"}, "projeto_situacao": {"type": "string"}, "projeto_prazo": {"type": "string"}, "projeto_responsavel": {"type": "string"}, "projeto_descricao": {"type": "string"}, "projeto_categoria": {"type": "string"}}, "required": ["xlsx_url", "projeto_nome", "projeto_situacao", "projeto_prazo", "projeto_responsavel"]}),
         FunctionDeclaration(name="list_tasks_by_status", description="Lista tarefas com base em um status exato (ex: 'não iniciada', 'concluída').", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
         FunctionDeclaration(name="count_tasks_by_status", description="Conta tarefas com base em um status exato (ex: 'não iniciada', 'concluída').", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
         FunctionDeclaration(name="find_project_responsavel", description="Encontra o nome do responsável por um projeto (busca por nome exato).", parameters={"type": "object", "properties": {"project_name": {"type": "string"}}, "required": ["project_name"]}),
         FunctionDeclaration(name="count_tasks_in_project", description="Conta o número de tarefas em um projeto (busca por nome exato).", parameters={"type": "object", "properties": {"project_name": {"type": "string"}}, "required": ["project_name"]}),
+        # --- ADIÇÃO: Nova ferramenta 'list_tasks_by_project_name' ---
+        FunctionDeclaration(name="list_tasks_by_project_name", description="Lista as N primeiras tarefas de um projeto (busca por nome exato).", parameters={"type": "object", "properties": {"project_name": {"type": "string"}, "top_k": {"type": "integer"}}, "required": ["project_name"]}),
     ]
     return Tool(function_declarations=fns)
 
+# --- CORREÇÃO: 'exec_tool' atualizado ---
 async def exec_tool(name: str, args: Dict[str, Any], user_id: Optional[str] = None) -> Dict[str, Any]:
     try:
         if name == "count_all_projects": return {"ok": True, "data": count_all_projects()}
@@ -925,6 +987,9 @@ async def exec_tool(name: str, args: Dict[str, Any], user_id: Optional[str] = No
         if name == "count_tasks_by_status": return {"ok": True, "data": count_tasks_by_status(args["status"])}
         if name == "find_project_responsavel": return {"ok": True, "data": find_project_responsavel(args["project_name"])}
         if name == "count_tasks_in_project": return {"ok": True, "data": count_tasks_in_project(args["project_name"])}
+        # --- ADIÇÃO: Nova ferramenta 'list_tasks_by_project_name' ---
+        if name == "list_tasks_by_project_name": return {"ok": True, "data": list_tasks_by_project_name(args["project_name"], args.get("top_k", 10))}
+        
         if name == "update_project": return {"ok": True, "data": await update_project(args["project_id"], args.get("patch", {}))}
         if name == "create_project": return {"ok": True, "data": await create_project(args, user_id=user_id)}
         if name == "create_task": return {"ok": True, "data": await create_task(args)}
@@ -940,6 +1005,8 @@ async def exec_tool(name: str, args: Dict[str, Any], user_id: Optional[str] = No
             except Exception: 
                 detail = e.response.text
         return {"ok": False, "error": detail}
+# --- FIM DA CORREÇÃO ---
+
 def _normalize_answer(raw: str, nome_usuario: str) -> str:
     raw = re.sub(r"[*_`#>]+", "", raw).strip()
     if all(sym not in raw for sym in ("🙂", "😊", "👋")):
@@ -1011,8 +1078,8 @@ async def ai_chat(req: ChatRequest, _=Depends(require_api_key)):
         user_msg=req.pergunta, 
         history=req.history, 
         nome_usuario=req.nome_usuario,
-        email_usuario=req.email_usuario, # <-- ADICIONADO
-        id_usuario=req.id_usuario        # <-- ADICIONADO
+        email_usuario=req.email_usuario, 
+        id_usuario=req.id_usuario        
     )
     response_data = {
         "tipo_resposta": "TEXTO",
@@ -1026,6 +1093,7 @@ async def tasks_from_xlsx(
     _=Depends(require_api_key), 
     projeto_id: Optional[str] = Form(None),
     projeto_nome: Optional[str] = Form(None),
+    id_usuario: Optional[str] = Form(None),
     create_project_flag: int = Form(0),
     projeto_situacao: Optional[str] = Form(None),
     projeto_prazo: Optional[str] = Form(None),
@@ -1038,12 +1106,14 @@ async def tasks_from_xlsx(
     file_bytes = await file.read() if file else None
     result = await tasks_from_xlsx_logic(
         projeto_id=projeto_id, projeto_nome=projeto_nome,
+        user_id=id_usuario, # <-- CORREÇÃO: Passa o ID para a lógica
         create_project_flag=create_project_flag, projeto_situacao=projeto_situacao,
         projeto_prazo=projeto_prazo, projeto_responsavel=projeto_responsavel,
         projeto_descricao=projeto_descricao, projeto_categoria=projeto_categoria,
         xlsx_url=xlsx_url, file_bytes=file_bytes
     )
     return result
+
 @app.get("/")
 def root():
     return {
