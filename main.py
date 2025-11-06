@@ -1,4 +1,4 @@
-# main.py (V9 - Convertendo PDF para "Fotos" PNG)
+# main.py (V10 - Usando Texto Bruto para Enigma)
 import os, io, re, time, asyncio
 from typing import List, Optional, Dict, Any, Tuple
 from urllib.parse import urlparse, parse_qs, unquote, quote, urljoin
@@ -83,7 +83,7 @@ DEFAULT_TOP_K = 8
 # =========================
 # FastAPI App (Único)
 # =========================
-app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="2.0.4")
+app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="10")
 
 origins = [
     "http://localhost:5173",
@@ -923,7 +923,7 @@ def toolset() -> Tool:
         FunctionDeclaration(name="list_my_projects", description="Lista os projetos de responsabilidade do usuário ATUAL.", parameters={"type": "object", "properties": {}}),
         FunctionDeclaration(name="update_project", description="Atualiza campos de um projeto.", parameters={"type": "object", "properties": {"project_id": {"type": "string"}, "patch": {"type": "object", "properties": {"nome": {"type": "string"}, "situacao": {"type": "string"}, "prazo": {"type": "string"}}}}, "required": ["project_id", "patch"]}),        
         FunctionDeclaration(name="create_project", description="Cria um novo projeto.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "responsavel": {"type": "string"}, "situacao": {"type": "string"}, "prazo": {"type": "string"}}, "required": ["nome", "responsavel", "situacao", "prazo"]}),
-        FunctionDeclaration(name="create_task", description="Cria uma nova tarefa.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "projeto_id": {"type": "string"}, "responsavel_id": {"type": "string"}, "prazo": {"type": "string"}, "status": {"type": "string"}}, "required": ["nome", "projeto_id", "responsavel_id", "prazo", "status"]}),
+        FunctionDeclaration(name="create_task", description="Cria um nova tarefa.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "projeto_id": {"type": "string"}, "responsavel_id": {"type": "string"}, "prazo": {"type": "string"}, "status": {"type": "string"}}, "required": ["nome", "projeto_id", "responsavel_id", "prazo", "status"]}),
         FunctionDeclaration(name="update_task", description="Atualiza campos de uma tarefa.", parameters={"type": "object", "properties": {"task_id": {"type": "string"}, "patch": {"type": "object", "properties": {"nome": {"type": "string"}, "status": {"type": "string"}, "prazo": {"type": "string"}, "responsavel_id": {"type": "string"}}}}, "required": ["task_id", "patch"]}),
         FunctionDeclaration(name="import_project_from_url", description="Cria um projeto e importa tarefas a partir de uma URL de arquivo .xlsx ou Google Sheets.", parameters={"type": "object", "properties": {"xlsx_url": {"type": "string"}, "projeto_nome": {"type": "string"}, "projeto_situacao": {"type": "string"}, "projeto_prazo": {"type": "string"}, "projeto_responsavel": {"type": "string"}, "projeto_descricao": {"type": "string"}, "projeto_categoria": {"type": "string"}}, "required": ["xlsx_url", "projeto_nome", "projeto_situacao", "projeto_prazo", "projeto_responsavel"]}),
         FunctionDeclaration(name="list_tasks_by_status", description="Lista tarefas com base em um status exato (ex: 'não iniciada', 'concluída').", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
@@ -1094,9 +1094,6 @@ async def tasks_from_xlsx(
     )
     return result
 
-# --- ESTA É A FUNÇÃO (V9) QUE IMPLEMENTA O SEU PLANO ---
-# --- (USA O MODELO DE FOTOS E O NOVO PROMPT) ---
-
 @app.post("/ai/chat-with-pdf")
 async def ai_chat_with_pdf(
     pergunta: str = Form(...),
@@ -1110,34 +1107,38 @@ async def ai_chat_with_pdf(
     Endpoint de chat que "lê" um PDF enviado e usa o conteúdo
     como contexto para responder a pergunta do usuário.
     
-    CORRIGIDO (V9): Voltamos ao modelo (ex: 2.0-flash) e
-    agora convertemos as páginas do PDF em IMAGENS (PNG)
-    para que o modelo possa "ler" (OCR) o enigma corretamente.
+    CORRIGIDO (V10): Removemos a lógica de OCR (fotos)
+    e agora usamos o texto bruto (que preserva a capitalização)
+    para resolver o enigma, usando um prompt de IA unificado.
     """
     try:
         pdf_bytes = await file.read()
         
-        # O texto ainda é extraído para RAG (perguntas normais)
         raw_pdf_text = extract_full_pdf_text(pdf_bytes)
         rag_text = clean_pdf_text(raw_pdf_text)
         
-        pdf_tools_list = [
-            FunctionDeclaration(
-                name="solve_pdf_enigma",
-                description="Resolve o enigma de 'frase secreta' do PDF. Use esta ferramenta se o usuário perguntar sobre 'enigma', 'frase secreta', 'código', 'mensagem escondida', etc.",
-                parameters={"type": "object", "properties": {}}
-            )
-        ]
-        pdf_tool = Tool(function_declarations=pdf_tools_list)
-
         contexto_prompt = f"""
-        Use o CONTEÚDO DO DOCUMENTO abaixo E/OU a ferramenta 'solve_pdf_enigma'
-        para responder a PERGUNTA DO USUÁRIO.
+        Você é um especialista em decifrar enigmas e também um assistente.
+        Use o CONTEÚDO DO DOCUMENTO abaixo para responder a PERGUNTA DO USUÁRIO.
 
-        - Se a pergunta for sobre o 'enigma', 'frase secreta', 'código' ou 'mensagem escondida', USE A FERRAMENTA 'solve_pdf_enigma'.
-        - Para TODAS as outras perguntas (ex: 'quantos textos', 'qual o resumo'), responda APENAS com base no CONTEÚDO DO DOCUMENTO.
+        ==================== REGRAS ESPECIAIS PARA ENIGMAS ====================
+        SE, E SOMENTE SE, a pergunta do usuário for sobre 'enigma', 'frase secreta', 'código' ou 'mensagem escondida',
+        siga ESTAS regras para analisar o CONTEÚDO DO DOCUMENTO:
 
-        ==================== CONTEÚDO DO DOCUMENTO (para RAG) ====================
+        1.  O CONTEÚDO DO DOCUMENTO é um texto bruto que preserva letras maiúsculas "fora de lugar" (ex: 'contribUI' ou 'custO').
+        2.  Analise o texto palavra por palavra.
+        3.  Encontre TODAS as palavras que contêm letras maiúsculas "fora do padrão" (ex: 'EQuilibra', 'contribUI', 'custO').
+        4.  IGNORE palavras que são siglas (100% maiúsculas, como 'ISO' ou 'SUS').
+        5.  IGNORE palavras que são inícios normais de frase (ex: "Para", "A coordenação", "No controle", "Texto.1").
+        6.  Extraia APENAS as letras maiúsculas das palavras que você encontrou (ex: 'contribUI' -> 'UI', 'custO' -> 'O').
+        7.  Junte todas as letras maiúsculas em ordem para formar uma frase.
+        8.  Responda ao usuário com: "A frase secreta encontrada no arquivo é: [FRASE MONTADA]"
+
+        ==================== OUTRAS PERGUNTAS (RAG) ====================
+        Para TODAS as outras perguntas (ex: 'quantos textos', 'qual o resumo'), 
+        responda APENAS com base no CONTEÚDO DO DOCUMENTO.
+
+        ==================== CONTEÚDO DO DOCUMENTO ====================
         {rag_text[:10000]} 
         ===============================================================
 
@@ -1157,95 +1158,16 @@ async def ai_chat_with_pdf(
         model = init_model(system_prompt_filled)
         contents = [Content(role="user", parts=[Part.from_text(contexto_prompt)])]
         
-        resp = model.generate_content(contents, tools=[pdf_tool])
+        resp = model.generate_content(contents, tools=[])
         
-        if (
-            resp.candidates and resp.candidates[0].content and 
-            resp.candidates[0].content.parts and 
-            getattr(resp.candidates[0].content.parts[0], "function_call", None)
-        ):
-            call = resp.candidates[0].content.parts[0].function_call
-            
-            if call.name == "solve_pdf_enigma":
-                                
-                # --- ESTA É A LÓGICA DE "FOTOS" QUE VOCÊ PEDIU ---
-                
-                # --- ESTE É O NOVO PROMPT QUE VOCÊ PEDIU ---
-                enigma_prompt_text = f"""
-                Você é um especialista em decifrar enigmas.
-                As IMAGENS ANEXAS são páginas de um documento PDF.
-                Uma mensagem secreta está escondida nelas, usando letras maiúsculas "fora de lugar" (ex: 'contribUI' ou 'custO').
-
-                Sua tarefa é ler as imagens (usando OCR), encontrar essas letras e formar a mensagem secreta.
-                
-                REGRAS IMPORTANTES:
-                1.  Leia as imagens, palavra por palavra.
-                2.  Encontre TODAS as palavras que contêm letras maiúsculas "fora do padrão" (ex: 'EQuilibra', 'contribUI', 'custO').
-                3.  IGNORE palavras que são siglas (100% maiúsculas, como ISO ou SUS).
-                4.  IGNORE palavras que são inícios normais de frase (como "Para", "A coordenação", "No controle", "Texto.1").
-                5.  Extraia APENAS as letras maiúsculas das palavras que você encontrou (ex: 'contribUI' -> 'UI', 'custO' -> 'O').
-                6.  Coloque todas as letras maiúsculas que você extraiu em fila, em ordem.
-                7.  Descubra as palavras em português que essa fila de letras forma.
-                8.  Retorne APENAS a frase secreta completa e montada, e NADA MAIS.
-
-                (Por exemplo: se você encontrar 'EQuilibra', 'contribUI' e 'imPErfecções', você deve juntá-las e começar sua resposta com 'EQUIPE'.)
-
-                Qual é a mensagem secreta?
-                """
-                
-                # Criamos a parte do texto
-                enigma_part_texto = Part.from_text(enigma_prompt_text)
-                
-                # Criamos as "fotos" (imagens PNG) do PDF
-                image_parts = []
-                try:
-                    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-                        for page in doc:
-                            # Renderiza a página como uma imagem PNG
-                            pix = page.get_pixmap(dpi=150) # Resolução média
-                            img_bytes = pix.tobytes("png")
-                            image_parts.append(Part.from_data(
-                                data=img_bytes,
-                                mime_type="image/png"
-                            ))
-                except Exception as e_img:
-                    print(f"Erro ao converter PDF para imagens: {e_img}")
-                    raise HTTPException(status_code=500, detail=f"Erro ao processar PDF para OCR: {e_img}")
-                
-                if not image_parts:
-                    raise HTTPException(status_code=422, detail="Não foi possível converter o PDF em imagens para análise.")
-
-                # Enviamos o prompt E as imagens
-                enigma_contents = [Content(role="user", parts=[enigma_part_texto] + image_parts)]
-                
-                enigma_resp = model.generate_content(enigma_contents, tools=[])
-                
-                message = "Nenhuma mensagem secreta encontrada."
-                if enigma_resp.candidates and enigma_resp.candidates[0].content and enigma_resp.candidates[0].content.parts:
-                    message = getattr(enigma_resp.candidates[0].content.parts[0], "text", "") or message
-                    message = message.strip().replace("A frase secreta é: ", "").replace("A mensagem secreta é: ", "")
-
-                final_answer = _normalize_answer(f"A frase secreta encontrada no arquivo é: {message}", nome_usuario_fmt)
-                
-                tool_step_log = {
-                    "call": {"name": "solve_pdf_enigma (via Image-OCR)", "args": {"file": file.filename}},
-                    "result": {"ok": True, "data": message}
-                }
-                
-                response_data = {
-                    "tipo_resposta": "TEXTO_PDF",
-                    "conteudo_texto": final_answer,
-                    "dados": [tool_step_log]
-                }
-                return JSONResponse(response_data)
-            
-        # Lógica de fallback para RAG (perguntas normais)
         final_text = ""
         if resp.candidates and resp.candidates[0].content and resp.candidates[0].content.parts:
             final_text = getattr(resp.candidates[0].content.parts[0], "text", "") or ""
 
-        if not rag_text or not final_text:
-             final_text = "Desculpe, não consegui ler o texto desse PDF para responder sua pergunta. Tente perguntar sobre o enigma."
+        if not rag_text and "frase secreta" not in final_text:
+             final_text = "Desculpe, não consegui ler o texto desse PDF para responder sua pergunta."
+        elif not final_text:
+             final_text = "Desculpe, não consegui processar sua solicitação sobre o PDF."
 
         final_text = re.sub(r"(?i)(aguarde( um instante)?|só um momento|apenas um instante)[^\n]*", "", final_text).strip()
         final_answer = _normalize_answer(final_text, nome_usuario_fmt)
@@ -1253,7 +1175,7 @@ async def ai_chat_with_pdf(
         response_data = {
             "tipo_resposta": "TEXTO_PDF",
             "conteudo_texto": final_answer,
-            "dados": [{"tool_used": "RAG"}] # Log
+            "dados": [{"tool_used": "RAG_com_Enigma_Prompt"}] # Log
         }
         return JSONResponse(response_data)
 
