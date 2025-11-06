@@ -82,7 +82,7 @@ DEFAULT_TOP_K = 8
 # =========================
 # FastAPI App (Único)
 # =========================
-app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="17.0.0")
+app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="18.0.0")
 
 origins = [
     "http://localhost:5173",
@@ -639,8 +639,8 @@ Sua missão é ajudar colaboradores(as) como {nome_usuario} (email: {email_usuar
 REGRAS DE RESPOSTA (MAIS IMPORTANTE)
 ====================================================================
 **REGRA DE OURO: NÃO INVENTE DADOS.**
-- Se uma ferramenta for usada e retornar uma lista vazia (como `[]`), um valor 0, ou "não encontrado", sua resposta DEVE ser "Não encontrei [o que foi pedido]".
-- NUNCA, SOB NENHUMA CIRCUNSTÂNCIA, invente nomes de projetos, tarefas ou pessoas.
+- Se uma ferramenta for usada e retornar uma lista vazia (como `[]`), um valor 0, "não encontrado", ou um erro, sua resposta DEVE ser "Não encontrei [o que foi pedido]" ou "Desculpe, não consegui processar isso. [Mensagem de Erro]".
+- NUNCA, SOB NENHUMA CIRCUNSTÂNCIA, invente nomes de projetos, tarefas, pessoas ou frases secretas.
 **REGRA ANTI-CÓDIGO: VOCÊ É UM ASSISTENTE, NÃO UM PROGRAMADOR.**
 - Sua resposta para o usuário NUNCA deve ser um trecho de código (`print()`, JSON, etc).
 - Sua tarefa é: 1º *chamar* a ferramenta, 2º *esperar* o resultado, e 3º *depois* formular uma resposta em português.
@@ -951,7 +951,7 @@ async def _get_first_pdf_url_from_xlsx_url(url: str) -> str:
         raise ValueError("O XLSX não tem a coluna 'Documento Referência'.")
         
     for pdf_url in df["Documento Referência"]:
-        if pdf_url and str(pdf_url).lower().startswith("http") and ".pdf" in str(pdf_url).lower():
+        if pdf_url and str(pdf_url).lower().startswith("http"):
             return str(pdf_url) # Retorna o primeiro link de PDF válido
             
     raise ValueError("Não encontrei nenhum link de PDF válido na coluna 'Documento Referência' do arquivo.")
@@ -1038,13 +1038,9 @@ async def exec_tool(name: str, args: Dict[str, Any], user_id: Optional[str] = No
         if name == "update_task": return {"ok": True, "data": await update_task(args["task_id"], args.get("patch", {}))}
         if name == "import_project_from_url": return {"ok": True, "data": await import_project_from_url_tool(**args, user_id=user_id)}
         
-        # PDF Direto
         if name == "get_pdf_content_from_url": return {"ok": True, "data": await get_pdf_content_from_url_impl(args["url"])}
         if name == "solve_pdf_enigma_from_url": return {"ok": True, "data": await solve_pdf_enigma_from_url_impl(args["url"])}
 
-        # ====================================================================
-        # ================== NOVOS IFS ADICIONADOS ABAIXO ====================
-        # ====================================================================
         if name == "get_pdf_content_from_xlsx_url": return {"ok": True, "data": await get_pdf_content_from_xlsx_url_impl(args["url"])}
         if name == "solve_enigma_from_xlsx_url": return {"ok": True, "data": await solve_enigma_from_xlsx_url_impl(args["url"])}
 
