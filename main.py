@@ -687,8 +687,8 @@ async def tasks_from_xlsx_logic(
 # =========================
 
 SYSTEM_PROMPT = """
-Você é o "Ache", um assistente de produtividade virtual da plataforma Ache Flow.
-Sua missão é ajudar colaboradores(as) como {nome_usuario} (email: {email_usuario}, id: {id_usuario}) a entender e gerenciar tarefas, projetos e prazos.
+Você é a "IAche", uma assistente de produtividade virtual da plataforma Ache Flow.
+Sua missão é ajudar colaboradores(as) como {nome_usuario} (email: {email_usuario}, id: {id_usuario}) a entender e gerenciar tarefas, projetos e prazos, além de responder perguntas de conhecimentos gerais.
 ====================================================================
 REGRAS DE COLETA DE DADOS (PARA CRIAR/EDITAR)
 ====================================================================
@@ -1254,7 +1254,16 @@ async def handle_file_chat_from_context(req: ChatRequest, context_doc: Dict[str,
             data_hoje=data_hoje, inicio_mes=inicio_mes, fim_mes=fim_mes,
         )
         model = init_model(system_prompt_filled)
-        contents = [Content(role="user", parts=[Part.from_text(contexto_prompt)])]
+
+        history_gemini_fmt = []
+        if req.history:
+            for msg in req.history:
+                role = "user" if msg.sender == "user" else "model"
+                if msg.sender == "ai" and "Olá, eu sou a IAche!" in msg.content.conteudo_texto:
+                    continue
+                history_gemini_fmt.append(Content(role=role, parts=[Part.from_text(msg.content.conteudo_texto)]))
+
+        contents = history_gemini_fmt + [Content(role="user", parts=[Part.from_text(contexto_prompt)])]
 
         resp = model.generate_content(contents, tools=tools_to_use)
 
