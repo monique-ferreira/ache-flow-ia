@@ -59,7 +59,7 @@ class ChatRequest(BaseModel):
 PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT")
 LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
 APPLICATION_NAME = os.getenv("GOOGLE_CLOUD_APLICATION", "ai-service")
-GEMINI_MODEL_ID = os.getenv("GEMINI_MODEL_ID", "gemini-1.5-pro-001")
+GEMINI_MODEL_ID = os.getenv("GEMINI_MODEL_ID", "gemini-1.5-flash-001")
 
 API_KEY = os.getenv("API_KEY") 
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/acheflow")
