@@ -721,7 +721,17 @@ Sua tarefa é preencher os argumentos para as ferramentas.
 * **Se faltar:** O `patch` (o que mudar). O nome ou ID do projeto geralmente já é conhecido.
 * **Exemplo:** Se o usuário disser "vamos alterar o projeto Pega-Pega", você DEVE perguntar: "Claro! O que você gostaria de mudar no projeto 'Pega-Pega' (nome, situação, prazo, etc.)?"
 * **NÃO** pergunte pelo ID se o nome já foi dado. A ferramenta encontrará pelo nome.
-(O resto das regras de update_project, update_task e DADOS DE CONTEXTO permanecem iguais)
+**4. PARA: `update_task` (Atualizar Tarefa):**
+* **Identificação:** A ferramenta `update_task` precisa de 'patch' (o que mudar) e uma forma de achar a tarefa.
+* **Forma 1 (Ideal):** Se o usuário fornecer `task_name` E `project_name` (ex: "mudar a tarefa 'Debugar' do projeto 'AcheFlow'").
+    - Você TEM AMBOS. Chame a ferramenta `update_task(task_name="Debugar", project_name="AcheFlow", patch={...})`.
+* **Forma 2 (Amígua):** Se o usuário fornecer APENAS `task_name` (ex: "mudar a tarefa 'Debugar'").
+    - **NÃO** chame a ferramenta.
+    - Você DEVE perguntar: "Claro! A tarefa 'Debugar' pertence a qual projeto?"
+* **Forma 3 (Contexto da Imagem):** O usuário pede para "atualizar uma tarefa" e você lista as tarefas SEM ID.
+    - **NÃO** peça o ID.
+    - Se o usuário responder com o NOME da tarefa (ex: "quero atualizar a tarefa 'Verificar requisitos'"), você está na **Forma 2**. Pergunte o nome do projeto (ex: "Certo. E essa tarefa 'Verificar requisitos' é de qual projeto?").
+(O resto das regras de DADOS DE CONTEXTO permanecem iguais)
 ====================================================================
 REGRAS DE RESPOSTA (AGORA SECUNDÁRIAS)
 ====================================================================
@@ -851,16 +861,37 @@ async def create_task(doc: Dict[str, Any]) -> Dict[str, Any]:
         if not data.get("nome"): raise ValueError("nome é obrigatório")
         return await create_task_api(client, data)
 
-async def update_task(tid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
+async def update_task(
+    patch: Dict[str, Any], 
+    task_id: Optional[str] = None, 
+    task_name: Optional[str] = None, 
+    project_name: Optional[str] = None
+) -> Dict[str, Any]:
+    resolved_tid = task_id
+    if not resolved_tid:
+        if not task_name or not project_name:
+            raise ValueError("Para atualizar uma tarefa sem ID, você DEVE fornecer 'task_name' e 'project_name'.")
+        try:
+            tasks_in_project = list_tasks_by_project_name(project_name, top_k=2000) 
+        except Exception as e:
+            raise ValueError(f"Erro ao buscar tarefas do projeto '{project_name}' no banco: {e}")
+        task_name_lower = task_name.lower()
+        hit = next((t for t in tasks_in_project if str(t.get('nome')).lower() == task_name_lower), None)
+        if hit:
+            resolved_tid = hit.get('_id') or hit.get('id') # Pega o ID em string
+        else:
+            raise ValueError(f"Tarefa '{task_name}' não foi encontrada no projeto '{project_name}'.")
+    if not resolved_tid:
+         raise ValueError(f"Não foi possível encontrar a tarefa '{task_name}'.")
     async with httpx.AsyncClient() as client:
         auth_headers = await get_api_auth_headers(client, use_json=True)
         allowed = {"nome", "descricao", "prioridade", "status", "prazo", "responsavel_id", "projeto_id"}
         payload = {k: v for k, v in patch.items() if k in allowed and v is not None}
-        if not payload: raise ValueError("patch vazio")
-        url = f"{TASKS_API_BASE}/tarefas/{tid}" 
+        if not payload: raise ValueError("Nenhum campo válido para atualizar ('patch' vazio).")
+        url = f"{TASKS_API_BASE}/tarefas/{resolved_tid}"
         resp = await client.put(url, json=payload, headers=auth_headers)
         resp.raise_for_status(); return resp.json()
-
+    
 def list_tasks_by_status(status: str, top_k: int = 50) -> List[Dict[str, Any]]:
     status_norm = (status or "").strip()
     if not status_norm: return []
@@ -1039,19 +1070,19 @@ async def solve_enigma_from_xlsx_url_impl(url: str) -> str:
 def toolset() -> Tool:
     fns = [
         FunctionDeclaration(name="count_all_projects", description="Conta e retorna o número total de projetos.", parameters={"type": "object", "properties": {}}),
-        FunctionDeclaration(name="count_projects_by_status", description="Conta e retorna o número de projetos por status (ex: 'em andamento').", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
+        FunctionDeclaration(name="count_projects_by_status", description="Conta e retorna o número de projetos por status (ex: 'em andamento').", parameters={"type": "object", "properties": {"status": {"type": "string"}, "required": ["status"]}}),
         FunctionDeclaration(name="list_all_projects", description="Lista todos os projetos.", parameters={"type": "object", "properties": {}}),
         FunctionDeclaration(name="list_all_tasks", description="Lista todas as tarefas.", parameters={"type": "object", "properties": {}}),
         FunctionDeclaration(name="list_all_funcionarios", description="Lista todos os funcionários.", parameters={"type": "object", "properties": {}}),
         FunctionDeclaration(name="list_tasks_by_deadline_range", description="Lista tarefas com prazo entre datas (YYYY-MM-DD).", parameters={"type": "object", "properties": {"start": {"type": "string"}, "end": {"type": "string"}}, "required": ["start", "end"]}),
-        FunctionDeclaration(name="upcoming_deadlines", description="Lista tarefas com prazo vencendo nos próximos X dias.", parameters={"type": "object", "properties": {"days": {"type": "integer"}}, "required": ["days"]}),
-        FunctionDeclaration(name="list_projects_by_status", description="Lista projetos por status (ex: 'em andamento').", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
+        FunctionDeclaration(name="upcoming_deadlines", description="Lista tarefas com prazo vencendo nos próximos X dias.", parameters={"type": "object", "properties": {"days": {"type": "integer"}, "required": ["days"]}}),
+        FunctionDeclaration(name="list_projects_by_status", description="Lista projetos por status (ex: 'em andamento').", parameters={"type": "object", "properties": {"status": {"type": "string"}, "required": ["status"]}}),
         FunctionDeclaration(name="count_my_projects", description="Conta quantos projetos são de responsabilidade do usuário ATUAL.", parameters={"type": "object", "properties": {}}),
         FunctionDeclaration(name="list_my_projects", description="Lista os projetos de responsabilidade do usuário ATUAL.", parameters={"type": "object", "properties": {}}),
-        FunctionDeclaration(name="update_project", description="Atualiza campos de um projeto.", parameters={"type": "object", "properties": {"project_id": {"type": "string"}, "patch": {"type": "object", "properties": {"nome": {"type": "string"}, "situacao": {"type": "string"}, "prazo": {"type": "string"}}}}, "required": ["project_id", "patch"]}),        
+        FunctionDeclaration(name="update_project", description="Atualiza campos de um projeto. Forneça o 'patch' (o que mudar) e uma forma de identificar o projeto ('project_id' ou 'project_name').", parameters={"type": "object", "properties": {"project_id": {"type": "string", "description": "O ID do projeto a ser atualizado."}, "project_name": {"type": "string", "description": "O NOME do projeto a ser atualizado (se o ID for desconhecido)."}, "patch": {"type": "object", "properties": {"nome": {"type": "string", "description": "O novo nome do projeto."}, "situacao": {"type": "string", "description": "A nova situação (ex: Em andamento)."}, "prazo": {"type": "string", "description": "O novo prazo (formato DD-MM-AAAA)."}, "responsavel": {"type": "string", "description": "O novo responsável (nome ou email)."}, "descricao": {"type": "string", "description": "A nova descrição."}, "categoria": {"type": "string", "description": "A nova categoria."}}, "description": "Um objeto JSON com os campos que você deseja alterar."}}, "required": ["patch"]}),
+        FunctionDeclaration(name="update_task", description="Atualiza campos de uma tarefa. Forneça 'patch' (o que mudar) e identifique a tarefa via 'task_id' OU ('task_name' + 'project_name').", parameters={"type": "object", "properties": {"task_id": {"type": "string", "description": "O ID da tarefa a ser atualizada (se souber)."}, "task_name": {"type": "string", "description": "O NOME da tarefa a ser atualizada."}, "project_name": {"type": "string", "description": "O NOME do projeto que contém a tarefa (OBRIGATÓRIO se usar 'task_name')."}, "patch": {"type": "object", "properties": {"nome": {"type": "string", "description": "O novo nome da tarefa."}, "status": {"type": "string", "description": "O novo status (ex: em andamento)."}, "prazo": {"type": "string", "description": "O novo prazo (formato DD-MM-AAAA)."}, "responsavel_id": {"type": "string", "description": "O ID do novo responsável."}, "projeto_id": {"type": "string", "description": "O ID do projeto para mover a tarefa."}, "descricao": {"type": "string", "description": "A nova descrição."}, "prioridade": {"type": "string", "description": "A nova prioridade (ex: alta)."}}, "description": "Um objeto JSON com os campos que você deseja alterar."}}, "required": ["patch"]}),
         FunctionDeclaration(name="create_project", description="Cria um novo projeto.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "responsavel": {"type": "string"}, "situacao": {"type": "string"}, "prazo": {"type": "string"}}, "required": ["nome", "responsavel", "situacao", "prazo"]}),
         FunctionDeclaration(name="create_task", description="Cria um nova tarefa.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "projeto_id": {"type": "string"}, "responsavel_id": {"type": "string"}, "prazo": {"type": "string"}, "status": {"type": "string"}}, "required": ["nome", "projeto_id", "responsavel_id", "prazo", "status"]}),
-        FunctionDeclaration(name="update_task", description="Atualiza campos de uma tarefa.", parameters={"type": "object", "properties": {"task_id": {"type": "string"}, "patch": {"type": "object", "properties": {"nome": {"type": "string"}, "status": {"type": "string"}, "prazo": {"type": "string"}, "responsavel_id": {"type": "string"}}}}, "required": ["task_id", "patch"]}),
         FunctionDeclaration(name="import_project_from_url", description="Cria um projeto e importa tarefas a partir de uma URL de arquivo .xlsx ou Google Sheets.", parameters={"type": "object", "properties": {"xlsx_url": {"type": "string"}, "projeto_nome": {"type": "string"}, "projeto_situacao": {"type": "string"}, "projeto_prazo": {"type": "string"}, "projeto_responsavel": {"type": "string"}, "projeto_descricao": {"type": "string"}, "projeto_categoria": {"type": "string"}}, "required": ["xlsx_url", "projeto_nome", "projeto_situacao", "projeto_prazo", "projeto_responsavel"]}),
         FunctionDeclaration(name="list_tasks_by_status", description="Lista tarefas com base em um status exato (ex: 'não iniciada', 'concluída').", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
         FunctionDeclaration(name="count_tasks_by_status", description="Conta tarefas com base em um status exato (ex: 'não iniciada', 'concluída').", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
@@ -1061,17 +1092,8 @@ def toolset() -> Tool:
         
         FunctionDeclaration(name="get_pdf_content_from_url", description="Extrai e retorna todo o texto de um arquivo PDF hospedado em uma URL. Use isso para 'ler' ou 'analisar' um PDF.", parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
         FunctionDeclaration(name="solve_pdf_enigma_from_url", description="Encontra uma 'frase secreta' escondida em um PDF (letras maiúsculas fora de lugar) a partir de uma URL.", parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
-
-        FunctionDeclaration(
-            name="get_pdf_content_from_xlsx_url", 
-            description="Extrai o texto de um PDF que está LINKADO DENTRO de um arquivo .xlsx ou Google Sheets. Use se o usuário fornecer uma URL de planilham, mas pedir para 'ler o PDF' ou 'resumir o PDF'.", 
-            parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}
-        ),
-        FunctionDeclaration(
-            name="solve_enigma_from_xlsx_url", 
-            description="Resolve um enigma de um PDF que está LINKADO DENTRO de um arquivo .xlsx ou Google Sheets. Use se o usuário fornecer uma URL de planilha e pedir o 'enigma' ou 'frase secreta'.", 
-            parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}
-        ),
+        FunctionDeclaration(name="get_pdf_content_from_xlsx_url", description="Extrai o texto de um PDF que está LINKADO DENTRO de um arquivo .xlsx ou Google Sheets. Use se o usuário fornecer uma URL de planilham, mas pedir para 'ler o PDF' ou 'resumir o PDF'.", parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
+        FunctionDeclaration(name="solve_enigma_from_xlsx_url", description="Resolve um enigma de um PDF que está LINKADO DENTRO de um arquivo .xlsx ou Google Sheets. Use se o usuário fornecer uma URL de planilha e pedir o 'enigma' ou 'frase secreta'.", parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
     ]
     return Tool(function_declarations=fns)
 
@@ -1095,7 +1117,7 @@ async def exec_tool(name: str, args: Dict[str, Any], user_id: Optional[str] = No
         if name == "update_project": return {"ok": True, "data": await update_project(patch=args.get("patch", {}), project_id=args.get("project_id"), project_name=args.get("project_name"), user_id=user_id)}              
         if name == "create_project": return {"ok": True, "data": await create_project(args, user_id=user_id)}
         if name == "create_task": return {"ok": True, "data": await create_task(args)}
-        if name == "update_task": return {"ok": True, "data": await update_task(args["task_id"], args.get("patch", {}))}
+        if name == "update_task": return {"ok": True, "data": await update_task(patch=args.get("patch", {}), task_id=args.get("task_id"), task_name=args.get("task_name"), project_name=args.get("project_name"))}
         if name == "import_project_from_url": return {"ok": True, "data": await import_project_from_url_tool(**args, user_id=user_id)}
         
         if name == "get_pdf_content_from_url": return {"ok": True, "data": await get_pdf_content_from_url_impl(args["url"])}
