@@ -1212,25 +1212,31 @@ async def ai_chat_with_pdf(
                 # ----------------------------------------------------
                 
                 cleanup_prompt = f"""
-                Minha função Python extraiu a seguinte frase secreta de um documento.
-                A extração é literal e agrupa apenas as letras maiúsculas, com espaçamento incorreto.
+                Minha função Python extraiu a seguinte frase secreta literal: "{secret_message_raw}"
                 
-                Frase extraída: "{secret_message_raw}"
+                Sua tarefa é formatar esta frase para que ela se torne legível em português, seguindo regras MUITO ESTRITAS:
                 
-                Sua tarefa é "limpar" esta frase para que ela se torne legível.
-                1.  Combine os blocos de letras para formar palavras em português (ex: "VO CES" -> "VOCES").
-                2.  Adicione a acentuação correta (ex: 'VOCES' -> 'VOCÊS', 'SAO' -> 'SÃO').
-                3.  Mantenha a ordem exata das letras.
-                4.  NÃO adicione, remova ou altere nenhuma letra (apenas adicione acentos). A frase deve usar EXATAMENTE as letras da "Frase extraída".
+                1.  **Ordem e Letras:** A ordem das letras e as próprias letras NÃO PODEM MUDAR.
+                    (Exemplo: O bloco 'EQ UI PE' deve se tornar 'EQUIPE'. O 'Q' não pode ser inventado. O 'E' inicial não pode virar 'É'.)
+                2.  **Acentuação:** Adicione a acentuação correta onde necessário. (Ex: 'VOCES' -> 'VOCÊS', 'SAO' -> 'SÃO').
+                3.  **Sem Pontuação:** NÃO adicione NENHUMA pontuação (vírgulas, pontos de exclamação, etc.). A saída deve ser "texto liso".
+                4.  **Caixa Alta:** A saída final deve ser TODA EM MAIÚSCULAS.
                 
-                Responda APENAS com a frase limpa e formatada.
+                Frase Bruta: "{secret_message_raw}"
+                Transforme isso em uma frase limpa, em português, toda em maiúsculas, sem pontuação.
+                
+                Exemplo de 'antes' e 'depois':
+                - Antes: "EQ UI PE VO C E S PA SS AR AM"
+                - Depois: "EQUIPE VOCÊS PASSARAM"
+                
+                Responda APENAS com a frase final limpa.
                 """
                 
-                print("[DEBUG-V15] Chamando IA (Gemini) para limpeza...")
+                print("[DEBUG-V16] Chamando IA (Gemini) para limpeza ESTRITA...")
                 
                 cleanup_contents = [Content(role="user", parts=[Part.from_text(cleanup_prompt)])]
                 cleanup_resp = model.generate_content(cleanup_contents, tools=[])
-                
+                                
                 final_answer_cleaned = ""
                 if cleanup_resp.candidates and cleanup_resp.candidates[0].content and cleanup_resp.candidates[0].content.parts:
                     final_answer_cleaned = getattr(cleanup_resp.candidates[0].content.parts[0], "text", "").strip()
