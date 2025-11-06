@@ -1,4 +1,4 @@
-# main.py
+# main.py (V9 - Convertendo PDF para "Fotos" PNG)
 import os, io, re, time, asyncio
 from typing import List, Optional, Dict, Any, Tuple
 from urllib.parse import urlparse, parse_qs, unquote, quote, urljoin
@@ -8,15 +8,13 @@ import requests
 import httpx
 import pandas as pd
 import pdfplumber
-import fitz # PyMuPDF (ESTE IMPORT FOI ADICIONADO)
+import fitz # PyMuPDF
 from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, Depends
 from fastapi.responses import JSONResponse
-# --- ADICIONADO IMPORT FALTANTE ---
 from fastapi.middleware.cors import CORSMiddleware
-# --- FIM DA ADIÇÃO ---
 from pydantic import BaseModel, Field
 
-# Vertex AI (Imports corretos)
+# Vertex AI
 from vertexai import init as vertex_init
 from vertexai.generative_models import (
     GenerativeModel,
@@ -43,7 +41,7 @@ class MessageContent(BaseModel):
     dados: Optional[List[Any]] = None
 
 class HistoryMessage(BaseModel):
-    sender: str # 'user', 'ai', ou 'system'
+    sender: str
     content: MessageContent
 
 class ChatRequest(BaseModel):
@@ -59,7 +57,7 @@ class ChatRequest(BaseModel):
 PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT")
 LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
 APPLICATION_NAME = os.getenv("GOOGLE_CLOUD_APLICATION", "ai-service")
-GEMINI_MODEL_ID = os.getenv("GEMINI_MODEL_ID", "gemini-1.5-flash-001")
+GEMINI_MODEL_ID = os.getenv("GEMINI_MODEL_ID", "gemini-2.0-flash-001")
 
 API_KEY = os.getenv("API_KEY") 
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/acheflow")
@@ -85,23 +83,21 @@ DEFAULT_TOP_K = 8
 # =========================
 # FastAPI App (Único)
 # =========================
-app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="2.0.4") # Versão
+app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="2.0.4")
 
-# === ADICIONADO BLOCO CORS ===
-# Lista de domínios que podem acessar sua API
 origins = [
-    "http://localhost:5173", # Para desenvolvimento local
-    "http://localhost:5174", # Outra porta local comum
-    "https.acheflow.web.app", # Exemplo de site no ar
-    "https.acheflow.firebaseapp.com" # Exemplo de site no ar
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "https.acheflow.web.app",
+    "https.acheflow.firebaseapp.com"
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,       # Permite origens específicas
+    allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],         # Permite todos os métodos (GET, POST, etc.)
-    allow_headers=["*"],         # Permite todos os cabeçalhos (x-api-key, etc.)
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 # ===============================
 
@@ -109,7 +105,6 @@ app.add_middleware(
 # Segurança
 # =========================
 def require_api_key(x_api_key: Optional[str] = Header(None)):
-    """Dependência do FastAPI para proteger rotas"""
     if API_KEY and (x_api_key or "") != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API Key")
 
@@ -145,7 +140,6 @@ async def all_exception_handler(request, exc):
 def today() -> datetime: return datetime.utcnow()
 def iso_date(d: datetime) -> str: return d.date().isoformat()
 
-# --- FUNÇÃO QUE ESTAVA FALTANDO ---
 def month_bounds(d: datetime) -> Tuple[str, str]:
     first = d.replace(day=1).date().isoformat()
     if d.month == 12:
@@ -154,7 +148,6 @@ def month_bounds(d: datetime) -> Tuple[str, str]:
         nxt = d.replace(month=d.month + 1, day=1)
     last = (nxt - timedelta(days=1)).date().isoformat()
     return first, last
-# --- FIM DA ADIÇÃO ---
 
 def to_oid(id_str: str) -> ObjectId:
     try: return ObjectId(id_str)
@@ -164,37 +157,23 @@ def pick(d: Dict[str, Any], keys: List[str]) -> Dict[str, Any]:
     return {k: d.get(k) for k in keys if k in d}
 
 def extract_gsheet_id(url: str) -> Optional[str]:
-    """Extrai o ID de uma URL do Google Sheets."""
     if not url: return None
-    # Regex para .../d/SHEET_ID/.... (IDs têm tipicamente 44 caracteres)
     m = re.search(r"/d/([a-zA-Z0-9_-]{40,})", url)
     if m:
         return m.group(1)
     return None
 
-# main.py - Linha 160 (VERSÃO NOVA E RECURSIVA)
 def sanitize_doc(data: Any) -> Any:
-    # Se for um datetime ou date, converte para string
     if isinstance(data, (datetime, date)):
         return data.isoformat()
-    
-    # Se for um ObjectId, converte para string
     if isinstance(data, ObjectId):
         return str(data)
-    
-    # Se for um DBRef, converte para string (apenas o ID)
     if isinstance(data, DBRef):
         return str(data.id)
-    
-    # --- NOVO: Se for um dicionário (dict), chama a função recursivamente para cada valor ---
     if isinstance(data, dict):
         return {k: sanitize_doc(v) for k, v in data.items()}
-    
-    # --- NOVO: Se for uma lista (list), chama a função recursivamente para cada item ---
     if isinstance(data, list):
         return [sanitize_doc(item) for item in data]
-    
-    # Se for qualquer outro tipo (int, str, bool, None), retorna como está
     return data
 
 def mongo():
@@ -203,17 +182,12 @@ def mongo():
     client = MongoClient(MONGO_URI)
     try:
         db = client.get_default_database()
-        
         db.command("ping") 
         return db
     except Exception as e:
         raise RuntimeError(f"Não foi possível conectar ao MongoDB. Verifique a MONGO_URI e o firewall do Atlas. Erro: {e}")
 
 def _parse_date_robust(date_str: str) -> str:
-    """
-    Tenta converter uma data (ex: DD/MM/AAAA ou DD-MM-AAAA) para AAAA-MM-DD.
-    Se falhar, retorna o original (assumindo que já está AAAA-MM-DD).
-    """
     date_str = (date_str or "").strip()
     try:
         return datetime.strptime(date_str, "%d/%m/%Y").date().isoformat()
@@ -224,16 +198,9 @@ def _parse_date_robust(date_str: str) -> str:
             return date_str
 
 def _get_employee_map() -> Dict[str, str]:
-    """
-    Helper para buscar todos os funcionários e criar um mapa de 
-    { "id_do_funcionario": "Nome Sobrenome" }.
-    """
     try:
-        # Busca apenas os campos necessários
         employees_raw = mongo()[COLL_FUNCIONARIOS].find({}, {"nome": 1, "sobrenome": 1, "_id": 1})
         employees = [sanitize_doc(x) for x in employees_raw]
-        
-        # O _id já é uma string por causa do sanitize_doc
         return {
             str(emp.get("_id")): f"{emp.get('nome', '')} {emp.get('sobrenome', '')}".strip()
             for emp in employees
@@ -243,12 +210,7 @@ def _get_employee_map() -> Dict[str, str]:
         print(f"Erro ao buscar mapa de funcionários: {e}")
         return {}
 
-# Em main.py, substitua a função _enrich_doc_with_responsavel:
-
 def _enrich_doc_with_responsavel(doc: Dict[str, Any], employee_map: Dict[str, str]) -> Dict[str, Any]:
-    """
-    Substitui 'responsavel' (que é um ID sanitizado) por 'responsavel_nome'.
-    """
     resp_id_key = None
     if "responsavel" in doc:
         resp_id_key = "responsavel"
@@ -272,7 +234,6 @@ def _enrich_doc_with_responsavel(doc: Dict[str, Any], employee_map: Dict[str, st
         del doc[resp_id_key]
         
     return doc
-# === FIM DAS NOVAS FUNÇÕES HELPER ===
 
 # =========================
 # Helpers de Download (PDF/XLSX)
@@ -289,11 +250,9 @@ def fetch_bytes(url: str) -> bytes:
     if is_google_export:
         with requests.get(u, timeout=TIMEOUT_S, allow_redirects=True, headers=headers, stream=True) as r:
             r.raise_for_status()
-            
             ctype = (r.headers.get("Content-Type") or "").lower()
             if "openxmlformats-officedocument.spreadsheetml.sheet" not in ctype:
                 raise ValueError(f"URL do Google não retornou um XLSX. Content-Type: {ctype}")
-            
             content_bytes = io.BytesIO()
             for chunk in r.iter_content(chunk_size=8192):
                 content_bytes.write(chunk)
@@ -337,22 +296,13 @@ def fetch_pdf_bytes(url: str):
         if r["status"] == 200 and _is_pdf(r["content_type"], r["content"]): return r["content"]
     raise ValueError(f"Não foi possível obter PDF (último status={last['status'] if last else None}, content-type={last['content_type'] if last else None}).")
 
-# --- ESTA FUNÇÃO FOI SUBSTITUÍDA (Linha 379) ---
 def clean_pdf_text(s: str) -> str:
-    """
-    Limpa o texto extraído para RAG.
-    """
     if not s: return s
-    # Substitui quebras de linha únicas (mas não parágrafos) por espaço
     s = re.sub(r"([^\n])\n([^\n])", r"\1 \2", s)
-    # Normaliza múltiplos espaços
     s = re.sub(r"[ \t\r\f\v]+", " ", s)
-    # Remove espaços antes de pontuação
     s = re.sub(r"\s+([,;\.\!\?\:\)])", r"\1", s)
-    # Garante espaço depois de pontuação
     s = re.sub(r"([,;\.\!\?\:])([^\s])", r"\1 \2", s)
     return s.strip()
-# --- FIM DA SUBSTITUIÇÃO ---
 
 def _anchor_regex_flex(label: str) -> re.Pattern:
     m = re.search(r"(?i)texto\.?(\d+)", label or "");
@@ -397,24 +347,15 @@ def xlsx_bytes_to_dataframe_preserving_hyperlinks(xlsx_bytes: bytes) -> pd.DataF
         rows.append(record)
     return pd.DataFrame(rows)
 
-# --- ESTA FUNÇÃO FOI SUBSTITUÍDA (Linha 390) ---
 def extract_full_pdf_text(pdf_bytes: bytes) -> str:
-    """
-    Extrai TODO o texto de todas as páginas de um PDF usando PyMuPDF (fitz).
-    Retorna o texto bruto, preservando as quebras de linha originais.
-    Esta versão é mais robusta para fontes complexas.
-    """
     text_all = ""
     try:
-        # Abre o PDF a partir dos bytes em memória
         with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
             for page in doc:
-                # Extrai texto como blocos, preservando a formatação (importante para o enigma)
                 text_all += page.get_text("text") or ""
         return text_all
     except Exception as e:
         print(f"Erro ao extrair texto completo com PyMuPDF/fitz: {e}")
-        # Tenta o fallback (pdfplumber) se o fitz falhar
         try:
             with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
                 text_all = "\n".join((page.extract_text() or "") for page in pdf.pages if page.extract_text())
@@ -422,65 +363,32 @@ def extract_full_pdf_text(pdf_bytes: bytes) -> str:
         except Exception as e_plumber:
              print(f"Erro de fallback com pdfplumber: {e_plumber}")
              return ""
-# --- FIM DA SUBSTITUIÇÃO ---
     
 def extract_hidden_message(raw_text: str) -> str:
-    """
-    Encontra palavras com letras maiúsculas "fora do lugar" e
-    extrai as letras maiúsculas de cada palavra, unindo-as com espaços
-    para formar a frase secreta.
-    
-    CORRIGIDO (V6): Ignora siglas (UPPER) e inícios de frase
-    (incluindo frases com múltiplas palavras maiúsculas, como "Na Etapa...").
-    
-    (NOTA: Esta função não é mais a ideal, a IA fará isso)
-    """
-    if not raw_text:
-        return ""
-    
+    # Esta função não é mais usada para a rota principal do enigma (agora usamos IA)
+    # Mas mantemos para o endpoint /pdf/solve-enigma (que está quebrado, como sabemos)
+    if not raw_text: return ""
     secret_parts = []
-    
     text = re.sub(r"([a-zA-Z])\s*\n\s*([a-zA-Z])", r"\1\2", raw_text)
     text = re.sub(r"\s+", " ", text)
-    
     words = text.split()
-    
     sentence_enders = (".", "!", "?", ":")
-
     for i, word in enumerate(words):
         clean_word = word.rstrip(f",;:.\"'{''.join(sentence_enders)}")
-        
-        if not clean_word or len(clean_word) < 1:
-            continue
-
-        if clean_word.islower():
-            continue
-
-        if clean_word.isupper():
-            continue
-
+        if not clean_word or len(clean_word) < 1: continue
+        if clean_word.islower(): continue
+        if clean_word.isupper(): continue
         is_start_of_sentence = False
-        if i == 0:
-            is_start_of_sentence = True # É a primeira palavra do texto
+        if i == 0: is_start_of_sentence = True
         else:
             prev_word_raw = words[i-1]
             prev_word_clean = prev_word_raw.rstrip(f",;:.\"'{''.join(sentence_enders)}")
-
-            if any(prev_word_raw.endswith(ender) for ender in sentence_enders):
-                is_start_of_sentence = True
-            
+            if any(prev_word_raw.endswith(ender) for ender in sentence_enders): is_start_of_sentence = True
             elif not prev_word_clean.islower():
-                if prev_word_clean.istitle() or prev_word_clean.isupper():
-                    is_start_of_sentence = True
-        
-        if is_start_of_sentence and clean_word.istitle():
-            continue
-
+                if prev_word_clean.istitle() or prev_word_clean.isupper(): is_start_of_sentence = True
+        if is_start_of_sentence and clean_word.istitle(): continue
         caps = re.sub(r"[^A-Z]", "", word) 
-        
-        if caps:
-            secret_parts.append(caps)
-
+        if caps: secret_parts.append(caps)
     return " ".join(secret_parts)
     
 # =========================
@@ -530,16 +438,9 @@ async def create_project_api(client: httpx.AsyncClient, data: Dict[str, Any]) ->
     url = f"{TASKS_API_BASE}{TASKS_API_PROJECTS_PATH}"
     auth_headers = await get_api_auth_headers(client, use_json=True)
     payload = pick(data, ["nome", "responsavel_id", "situacao", "prazo", "descricao", "categoria"])
-    
     r = await client.post(url, json=payload, headers=auth_headers, timeout=TIMEOUT_S)
-    
     if r.status_code not in (200, 201):
-        raise httpx.HTTPStatusError(
-            f"Erro da API do Render: {r.status_code}", 
-            request=r.request, 
-            response=r
-        )
-    
+        raise httpx.HTTPStatusError(f"Erro da API do Render: {r.status_code}", request=r.request, response=r)
     return r.json()
 
 async def create_task_api(client: httpx.AsyncClient, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -547,16 +448,9 @@ async def create_task_api(client: httpx.AsyncClient, data: Dict[str, Any]) -> Di
     auth_headers = await get_api_auth_headers(client, use_json=True)
     payload = pick(data, ["nome", "projeto_id", "responsavel_id", "descricao", "prioridade", "status", "prazo", "documento_referencia", "concluido"])
     payload = {k: v for k, v in payload.items() if v is not None}
-    
     r = await client.post(url, json=payload, headers=auth_headers, timeout=TIMEOUT_S)
-    
     if r.status_code not in (200, 201):
-        raise httpx.HTTPStatusError(
-            f"Erro da API do Render: {r.status_code}", 
-            request=r.request, 
-            response=r
-        )
-        
+        raise httpx.HTTPStatusError(f"Erro da API do Render: {r.status_code}", request=r.request, response=r)
     return r.json()
 
 async def find_project_id_by_name(client: httpx.AsyncClient, projeto_nome: str) -> Optional[str]:
@@ -580,33 +474,19 @@ async def list_funcionarios(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
     try: return r.json() if isinstance(r.json(), list) else []
     except Exception: return []
 
-# Em main.py, substitua a função inteira (aprox. linha 583)
-
 async def resolve_responsavel_id(
     client: httpx.AsyncClient, 
     nome_ou_email: Optional[str],
     default_user_id: Optional[str] = None
 ) -> Optional[str]:
-    """
-    Encontra um ID de funcionário.
-    Prioridade:
-    1. Busca por nome/email.
-    2. Se não encontrar E nome_ou_email for 'eu', usa o default_user_id.
-    3. Se não encontrar E nome_ou_email estiver VAZIO, usa o default_user_id (se chat) ou o token (se import).
-    """
     nome_ou_email = (nome_ou_email or "").strip()
-    
     fallback_id = default_user_id if default_user_id else _token_cache.get("user_id")
-
     if nome_ou_email.lower() in ("eu", "mim", "me"):
         return default_user_id if default_user_id else _token_cache.get("user_id")
-
     if not nome_ou_email: 
         return fallback_id
-
     pessoas = await list_funcionarios(client)
     key = nome_ou_email.lower()
-    
     if len(key) == 24 and all(c in '0123456789abcdef' for c in key):
         if any(p.get("_id") == key for p in pessoas): return key
     for p in pessoas:
@@ -614,7 +494,6 @@ async def resolve_responsavel_id(
     for p in pessoas:
         full = f"{str(p.get('nome') or '').lower()} {str(p.get('sobrenome') or '').lower()}".strip()
         if full == key or str(p.get('nome') or '').lower() == key: return p.get("_id")
-    
     return fallback_id
 
 def duration_to_date(duracao: Optional[str]) -> str:
@@ -700,7 +579,6 @@ async def tasks_from_xlsx_logic(
             resolved_project_id = await find_project_id_by_name(client, projeto_nome)
         if not resolved_project_id:
             if create_project_flag and projeto_nome:
-                # --- CORREÇÃO: Passa 'user_id' para 'resolve_responsavel_id' ---
                 proj_resp_id = await resolve_responsavel_id(client, projeto_responsavel, default_user_id=user_id)
                 proj_prazo = (projeto_prazo or "").strip()
                 if not proj_prazo:
@@ -715,10 +593,8 @@ async def tasks_from_xlsx_logic(
                 raise HTTPException(status_code=404, detail={"erro": f"Projeto '{projeto_nome}' não encontrado. Para criar, envie 'create_project_flag=1'."})
         created, errors = [], []
         for item in preview:
-            # --- CORREÇÃO: Passa 'user_id' para 'resolve_responsavel_id' ---
             resp_id = await resolve_responsavel_id(client, item.get("responsavel"), default_user_id=user_id)
             try:
-                # --- CORREÇÃO: Removido 'data_inicio' ---
                 created.append(await create_task_api(client, {
                     "nome": item["titulo"], "descricao": item["descricao"],
                     "projeto_id": resolved_project_id, "responsavel_id": resp_id,
@@ -733,74 +609,59 @@ async def tasks_from_xlsx_logic(
 # =========================
 # Lógica da IA (do vertex_ai_service.py)
 # =========================
-# Em main.py, substitua a variável SYSTEM_PROMPT inteira por esta:
 
 SYSTEM_PROMPT = """
 Você é o "Ache", um assistente de produtividade virtual da plataforma Ache Flow.
 Sua missão é ajudar colaboradores(as) como {nome_usuario} (email: {email_usuario}, id: {id_usuario}) a entender e gerenciar tarefas, projetos e prazos.
-
 ====================================================================
 REGRAS DE RESPOSTA (MAIS IMPORTANTE)
 ====================================================================
 **REGRA DE OURO: NÃO INVENTE DADOS.**
 - Se uma ferramenta for usada e retornar uma lista vazia (como `[]`), um valor 0, ou "não encontrado", sua resposta DEVE ser "Não encontrei [o que foi pedido]".
 - NUNCA, SOB NENHUMA CIRCUNSTÂNCIA, invente nomes de projetos, tarefas ou pessoas.
-
 **REGRA ANTI-CÓDIGO: VOCÊ É UM ASSISTENTE, NÃO UM PROGRAMADOR.**
 - Sua resposta para o usuário NUNCA deve ser um trecho de código (`print()`, JSON, etc).
 - Sua tarefa é: 1º *chamar* a ferramenta, 2º *esperar* o resultado, e 3º *depois* formular uma resposta em português.
 - Se você responder com `print(defaultapi.createproject...)`, você falhou gravemente.
 - Você NUNCA deve inventar prefixos como `defaultapi` ou `print()`.
-
 1.  **REGRA DE FERRAMENTAS (PRIORIDADE 1):** Sua prioridade MÁXIMA é usar ferramentas.
     * **REFORÇO CRÍTICO:** Ao 'criar', 'atualizar' ou 'importar', você está PROIBIDO de responder "Projeto criado" ou "Tarefa atualizada" sem ANTES chamar a ferramenta e receber a confirmação.
     * **REGRA DE IMPORTAÇÃO (DESAMBIGUAÇÃO):** Se o usuário pedir para 'criar um projeto' E TAMBÉM fornecer uma URL (.xlsx ou Google Sheets) na *mesma* mensagem, ignore a ferramenta `create_project` e use APENAS a ferramenta `import_project_from_url`.
     * NUNCA pergunte "Posso buscar?". Apenas execute a ferramenta e retorne a resposta.
     * Sempre que usar uma ferramenta, resuma o resultado em português claro. NUNCA mostre nomes de funções (como 'list_all_projects') ou código.
-
 2.  **REGRA DE CONHECIMENTO GERAL (PRIORIDADE 2):** Se a pergunta NÃO PUDER ser respondida por NENHUMA ferramenta, use seu conhecimento pré-treinado.
     * Você NÃO precisa de acesso à internet para isso. Responda diretamente.
-
 3.  **REGRA DE AMBIGUIDADE:** Se uma pergunta for ambígua (ex: "o que é um diferencial?"), responda com seu conhecimento geral.
-
 4.  **REGRA DE FORMATAÇÃO:**
     * Fale sempre em português (PT-BR), de forma simpática.
     * NUNCA use markdown, asteriscos (*), negrito, ou blocos de código.
     * Use hífens simples para listas.
-
 ====================================================================
 REGRAS DE COLETA DE DADOS (PARA CRIAR/EDITAR)
 ====================================================================
 Sua tarefa é preencher os argumentos para as ferramentas.
-
 **REGRA PRINCIPAL:** Sempre tente extrair os parâmetros (como nome, prazo, etc.) da ÚLTIMA MENSAGEM DO USUÁRIO.
-
 - **SE** você conseguir extrair TODOS os argumentos **OBRIGATÓRIOS** (como `nome`, `prazo`, `situacao`, `responsavel`):
     - **NÃO PERGUNTE NADA MAIS.** Chame a ferramenta imediatamente.
     - Use `None` (ou simplesmente omita) para quaisquer argumentos **OPCIONAIS** (como `projeto_descricao` ou `projeto_categoria`) que não foram fornecidos.
 - **SE** algum argumento **OBRIGATÓÓRIO** estiver faltando:
     - **AÍ SIM,** pergunte APENAS pelos argumentos **OBRIGATÓRIOS** que faltam.
     - **NÃO** pergunte por argumentos opcionais.
-
 **REGRA DE AÇÃO DIRETA (A MAIS IMPORTANTE):**
 - **NUNCA** responda ao usuário com uma "confirmação" antes de agir.
 - **ERRADO (NÃO FAÇA ISSO):** O usuário diz "prazo 31-12-2025". Você responde: "OK. Criando projeto com prazo 31-12-2025."
 - **CORRETO (FAÇA ISSO):** O usuário diz "prazo 31-12-2025". Você *imediatamente* chama a ferramenta `create_project(...)` em segundo plano. Somente *depois* que a ferramenta retornar `{{"ok": True, "data": ...}}`, você responde ao usuário: "Projeto criado com sucesso! 🙂"
 - Se o usuário disser "isso" ou "sim" para confirmar, isso é sua instrução para **CHAMAR A FERRAMENTA**, não para falar mais.
-
 **1. PARA: `create_project` (Criar Projeto ÚNICO):**
 * **Argumentos OBRIGATÓRIOS:** `nome`, `situacao`, `prazo` (DD-MM-AAAA), `responsavel` (nome ou email).
 * **Argumentos Opcionais:** `descricao`, `categoria`.
-
 **2. PARA: `import_project_from_url` (Importar Projeto):**
 * **Argumentos OBRIGATÓRIOS:** `xlsx_url`, `projeto_nome`, `projeto_situacao`, `projeto_prazo`, `projeto_responsavel`.
 * **Argumentos Opcionais:** `projeto_descricao`, `projeto_categoria`.
-
 **3. PARA: `update_project` (Atualizar Projeto):**
 * **Se faltar:** O `patch` (o que mudar). O nome ou ID do projeto geralmente já é conhecido.
 * **Exemplo:** Se o usuário disser "vamos alterar o projeto Pega-Pega", você DEVE perguntar: "Claro! O que você gostaria de mudar no projeto 'Pega-Pega' (nome, situação, prazo, etc.)?"
 * **NÃO** pergunte pelo ID se o nome já foi dado. A ferramenta encontrará pelo nome.
-
 (O resto das regras de update_project, update_task e DADOS DE CONTEXTO permanecem iguais)
 ====================================================================
 DADOS DE CONTEXTO
@@ -812,53 +673,43 @@ DADOS DE CONTEXTO
 """
 
 def list_all_projects(top_k: int = 500) -> List[Dict[str, Any]]:
-    employee_map = _get_employee_map() # Pega o mapa de funcionários
+    employee_map = _get_employee_map()
     projects_raw = mongo()[COLL_PROJETOS].find({}).sort("prazo", 1).limit(top_k)
     projects_clean = [sanitize_doc(p) for p in projects_raw]
-    # Enriquece cada projeto com o nome do responsável
     return [_enrich_doc_with_responsavel(p, employee_map) for p in projects_clean]
 
 def list_all_tasks(top_k: int = 2000) -> List[Dict[str, Any]]:
-    employee_map = _get_employee_map() # Pega o mapa de funcionários
+    employee_map = _get_employee_map()
     tasks_raw = mongo()[COLL_TAREFAS].find({}).sort("prazo", 1).limit(top_k)
     tasks_clean = [sanitize_doc(t) for t in tasks_raw]
-    # Enriquece cada tarefa com o nome do responsável
     return [_enrich_doc_with_responsavel(t, employee_map) for t in tasks_clean]
 
 def list_all_funcionarios(top_k: int = 500) -> List[Dict[str, Any]]:
-    # Esta função não precisa de enriquecimento, ela é a fonte
     return [sanitize_doc(x) for x in mongo()[COLL_FUNCIONARIOS].find({}).sort("nome", 1).limit(top_k)]
 
 def list_tasks_by_deadline_range(start: str, end: str, top_k: int = 50) -> List[Dict[str, Any]]:
-    employee_map = _get_employee_map() # Pega o mapa de funcionários
+    employee_map = _get_employee_map()
     tasks_raw = mongo()[COLL_TAREFAS].find({"prazo": {"$gte": start, "$lte": end}}).sort("prazo", 1).limit(top_k)
     tasks_clean = [sanitize_doc(t) for t in tasks_raw]
-    # Enriquece cada tarefa com o nome do responsável
     return [_enrich_doc_with_responsavel(t, employee_map) for t in tasks_clean]
 
 def list_projects_by_status(status: str, top_k: int = 50) -> List[Dict[str, Any]]:
     status_norm = (status or "").strip()
-    if not status_norm:
-        return []
-
+    if not status_norm: return []
     rx = {"$regex": f"^{re.escape(status_norm)}$", "$options": "i"}
-        
-    employee_map = _get_employee_map() # Pega o mapa de funcionários
+    employee_map = _get_employee_map()
     projects_raw = mongo()[COLL_PROJETOS].find({"situacao": rx}).sort("prazo", 1).limit(top_k)
     projects_clean = [sanitize_doc(p) for p in projects_raw]
     return [_enrich_doc_with_responsavel(p, employee_map) for p in projects_clean]
 
 def upcoming_deadlines(days: int = 14, top_k: int = 50) -> List[Dict[str, Any]]:
     today_iso = iso_date(today()); limit_date = (today() + timedelta(days=days)).date().isoformat()
-    
-    employee_map = _get_employee_map() # Pega o mapa de funcionários
+    employee_map = _get_employee_map()
     tasks_raw = mongo()[COLL_TAREFAS].find({"prazo": {"$gte": today_iso, "$lte": limit_date}}).sort("prazo", 1).limit(top_k)
     tasks_clean = [sanitize_doc(t) for t in tasks_raw]
-    # Enriquece cada tarefa com o nome do responsável
     return [_enrich_doc_with_responsavel(t, employee_map) for t in tasks_clean]
 
 def count_all_projects() -> int:
-    """Conta o número total de projetos no banco."""
     try:
         return mongo()[COLL_PROJETOS].count_documents({})
     except Exception as e:
@@ -866,14 +717,10 @@ def count_all_projects() -> int:
         return -1
 
 def count_projects_by_status(status: str) -> int:
-    """Conta projetos com base em um status (ex: 'em andamento')."""
     status_norm = (status or "").strip()
-    if not status_norm:
-        return 0 # Retorna 0 se o status for vazio
-
+    if not status_norm: return 0
     try:
         rx = {"$regex": f"^{re.escape(status_norm)}$", "$options": "i"}
-        
         return mongo()[COLL_PROJETOS].count_documents({"situacao": rx})
     except Exception as e:
         print(f"Erro ao contar projetos por status: {e}")
@@ -889,24 +736,17 @@ async def update_project(
         resolved_pid = project_id
         if not resolved_pid and project_name:
             resolved_pid = await find_project_id_by_name(client, project_name)
-        
         if not resolved_pid:
             raise ValueError(f"Projeto '{project_name or project_id}' não encontrado ou ID/Nome não fornecido.")
-
         auth_headers = await get_api_auth_headers(client, use_json=True)
-        
         allowed = {"nome", "descricao", "categoria", "situacao"}
         payload = {k: v for k, v in patch.items() if k in allowed and v is not None}
-
         if "prazo" in patch and patch["prazo"]:
             payload["prazo"] = _parse_date_robust(patch["prazo"])
-        
         if "responsavel" in patch and patch["responsavel"]:
             resp_id = await resolve_responsavel_id(client, patch["responsavel"], default_user_id=user_id)
             payload["responsavel_id"] = resp_id
-
         if not payload: raise ValueError("Nenhum campo válido para atualizar ('patch' vazio).")
-        
         url = f"{TASKS_API_BASE}/projetos/{resolved_pid}" 
         resp = await client.put(url, json=payload, headers=auth_headers)
         resp.raise_for_status(); return resp.json()
@@ -915,30 +755,20 @@ async def create_project(doc: Dict[str, Any], user_id: Optional[str] = None) -> 
     async with httpx.AsyncClient() as client:
         data = pick(doc, ["nome", "situacao", "descricao", "categoria"])
         if not data.get("nome"): raise ValueError("nome é obrigatório")
-        
         prazo_raw = doc.get("prazo")
         if prazo_raw:
             data["prazo"] = _parse_date_robust(prazo_raw)
-
         responsavel_str = doc.get("responsavel") 
-        
-        resolved_id = await resolve_responsavel_id(
-            client, 
-            responsavel_str, 
-            default_user_id=user_id
-        )
+        resolved_id = await resolve_responsavel_id(client, responsavel_str, default_user_id=user_id)
         data["responsavel_id"] = resolved_id
-        
         return await create_project_api(client, data)
-
-# --- CORREÇÃO: Removido 'data_inicio' ---            
+          
 async def create_task(doc: Dict[str, Any]) -> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
         data = pick(doc, ["nome", "projeto_id", "responsavel_id", "descricao", "prioridade", "status", "prazo", "documento_referencia", "concluido"])
         if not data.get("nome"): raise ValueError("nome é obrigatório")
         return await create_task_api(client, data)
 
-# --- CORREÇÃO: Removido 'data_inicio' ---
 async def update_task(tid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
         auth_headers = await get_api_auth_headers(client, use_json=True)
@@ -950,26 +780,18 @@ async def update_task(tid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
         resp.raise_for_status(); return resp.json()
 
 def list_tasks_by_status(status: str, top_k: int = 50) -> List[Dict[str, Any]]:
-    """Lista tarefas com base em um status exato (ex: 'não iniciada', 'concluída')."""
     status_norm = (status or "").strip()
-    if not status_norm:
-        return []
-    
+    if not status_norm: return []
     rx = {"$regex": f"^{re.escape(status_norm)}$", "$options": "i"}
-    
     employee_map = _get_employee_map()
     tasks_raw = mongo()[COLL_TAREFAS].find({"status": rx}).sort("prazo", 1).limit(top_k)
     tasks_clean = [sanitize_doc(t) for t in tasks_raw]
     return [_enrich_doc_with_responsavel(t, employee_map) for t in tasks_clean]
 
 def count_tasks_by_status(status: str) -> int:
-    """Conta tarefas com base em um status exato (ex: 'não iniciada', 'concluída')."""
     status_norm = (status or "").strip()
-    if not status_norm:
-        return 0
-    
+    if not status_norm: return 0
     rx = {"$regex": f"^{re.escape(status_norm)}$", "$options": "i"}
-    
     try:
         return mongo()[COLL_TAREFAS].count_documents({"status": rx})
     except Exception as e:
@@ -977,50 +799,34 @@ def count_tasks_by_status(status: str) -> int:
         return -1
 
 def find_project_responsavel(project_name: str) -> str:
-    """Encontra o nome do responsável por um projeto específico."""
     project_name_norm = (project_name or "").strip()
     if not project_name_norm:
         return "Nome do projeto não fornecido."
-
     rx = {"$regex": f"^{re.escape(project_name_norm)}$", "$options": "i"}
     proj = mongo()[COLL_PROJETOS].find_one({"nome": rx})
-    
     if not proj:
         return f"Projeto '{project_name_norm}' não encontrado."
-
     proj_clean = sanitize_doc(proj)
-    
     employee_map = _get_employee_map()
     enriched_proj = _enrich_doc_with_responsavel(proj_clean, employee_map) 
-    
     return enriched_proj.get("responsavel_nome", "(Responsável não definido)")
 
 def count_tasks_in_project(project_name: str) -> int:
-    """Conta o número de tarefas associadas a um projeto específico."""
     project_name_norm = (project_name or "").strip()
-    if not project_name_norm:
-        return -1
-
+    if not project_name_norm: return -1
     try:
         rx_proj = {"$regex": f"^{re.escape(project_name_norm)}$", "$options": "i"}
         proj = mongo()[COLL_PROJETOS].find_one({"nome": rx_proj}, {"_id": 1})
-        
-        if not proj:
-            return -2
-
+        if not proj: return -2
         project_id = proj.get("_id")
-        
         task_query = {"projeto": DBRef(collection=COLL_PROJETOS, id=project_id)}
-        
         return mongo()[COLL_TAREFAS].count_documents(task_query)
     except Exception as e:
         print(f"Erro ao contar tarefas no projeto: {e}")
         return -3
 
 def count_projects_by_responsavel(responsavel_id_str: Optional[str]) -> int:
-    """Conta projetos de um responsável específico pelo ID."""
-    if not responsavel_id_str:
-        return -1
+    if not responsavel_id_str: return -1
     try:
         resp_oid = to_oid(responsavel_id_str)
         query = {"responsavel": DBRef(collection=COLL_FUNCIONARIOS, id=resp_oid)}
@@ -1030,13 +836,10 @@ def count_projects_by_responsavel(responsavel_id_str: Optional[str]) -> int:
         return -2
 
 def list_projects_by_responsavel(responsavel_id_str: Optional[str], top_k: int = 50) -> List[Dict[str, Any]]:
-    """Lista projetos de um responsável específico pelo ID."""
-    if not responsavel_id_str:
-        return []
+    if not responsavel_id_str: return []
     try:
         resp_oid = to_oid(responsavel_id_str)
         query = {"responsavel": DBRef(collection=COLL_FUNCIONARIOS, id=resp_oid)}
-        
         employee_map = _get_employee_map()
         projects_raw = mongo()[COLL_PROJETOS].find(query).sort("prazo", 1).limit(top_k)
         projects_clean = [sanitize_doc(p) for p in projects_raw]
@@ -1045,36 +848,22 @@ def list_projects_by_responsavel(responsavel_id_str: Optional[str], top_k: int =
         print(f"Erro ao listar projetos por responsável: {e}")
         return []
 
-# --- ADIÇÃO: Nova função 'list_tasks_by_project_name' ---
 def list_tasks_by_project_name(project_name: str, top_k: int = 10) -> List[Dict[str, Any]]:
-    """Lista as primeiras N tarefas de um projeto específico, buscando pelo nome do projeto."""
     project_name_norm = (project_name or "").strip()
-    if not project_name_norm:
-        return []
-
+    if not project_name_norm: return []
     try:
-        # 1. Encontrar o ID do projeto pelo nome
         rx_proj = {"$regex": f"^{re.escape(project_name_norm)}$", "$options": "i"}
         proj = mongo()[COLL_PROJETOS].find_one({"nome": rx_proj}, {"_id": 1})
-        
-        if not proj:
-            return [] # Projeto não encontrado, retorna lista vazia
-
+        if not proj: return []
         project_id = proj.get("_id")
-        
-        # 2. Buscar tarefas que referenciam esse ObjectId
         task_query = {"projeto": DBRef(collection=COLL_PROJETOS, id=project_id)}
-        
         employee_map = _get_employee_map()
         tasks_raw = mongo()[COLL_TAREFAS].find(task_query).sort("prazo", 1).limit(top_k)
         tasks_clean = [sanitize_doc(t) for t in tasks_raw]
         return [_enrich_doc_with_responsavel(t, employee_map) for t in tasks_clean]
-        
     except Exception as e:
         print(f"Erro ao listar tarefas do projeto: {e}")
         return []
-# --- FIM DA ADIÇÃO ---
-
 
 async def import_project_from_url_tool(
     xlsx_url: str, 
@@ -1092,22 +881,17 @@ async def import_project_from_url_tool(
         if sheet_id:
             effective_xlsx_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
     prazo_formatado = _parse_date_robust(projeto_prazo)
-
     return await tasks_from_xlsx_logic(
         projeto_id=None, projeto_nome=projeto_nome,
         user_id=user_id,
         create_project_flag=1, projeto_situacao=projeto_situacao,
         projeto_prazo=prazo_formatado, projeto_responsavel=projeto_responsavel,
         projeto_descricao=projeto_descricao, projeto_categoria=projeto_categoria,
-        xlsx_url=effective_xlsx_url, # Passa a URL tratada
+        xlsx_url=effective_xlsx_url,
         file_bytes=None
     )
 
 async def get_pdf_content_from_url_impl(url: str) -> str:
-    """
-    Puxa o texto completo de um PDF de uma URL.
-    Usado pela IA para "ler" um documento.
-    """
     try:
         pdf_bytes = fetch_pdf_bytes(url)
         return extract_full_pdf_text(pdf_bytes)
@@ -1115,19 +899,13 @@ async def get_pdf_content_from_url_impl(url: str) -> str:
         return f"Erro ao processar PDF da URL: {str(e)}"
 
 async def solve_pdf_enigma_from_url_impl(url: str) -> str:
-    """
-    Puxa um PDF de uma URL e tenta resolver o enigma da "frase secreta".
-    (NOTA: Esta função ainda usa a lógica antiga de Python, que pode falhar)
-    """
     try:
         pdf_bytes = fetch_pdf_bytes(url)
         full_text = extract_full_pdf_text(pdf_bytes)
         if not full_text:
             return "Não foi possível extrair texto do PDF."
-        
         message = extract_hidden_message(full_text)
         return message if message else "Nenhuma mensagem secreta encontrada."
-        
     except Exception as e:
         return f"Erro ao processar enigma do PDF: {str(e)}"
 
@@ -1187,12 +965,11 @@ async def exec_tool(name: str, args: Dict[str, Any], user_id: Optional[str] = No
         detail = str(e)
         if isinstance(e, httpx.HTTPStatusError):
             try: 
-                err_json = e.response.json() # --- BUG CORRIGIDO AQUI ---
+                err_json = e.response.json()
                 detail = err_json.get("detail", err_json.get("erro", str(e)))
             except Exception: 
                 detail = e.response.text
         return {"ok": False, "error": detail}
-# --- FIM DA CORREÇÃO ---
 
 def _normalize_answer(raw: str, nome_usuario: str) -> str:
     raw = re.sub(r"[*_`#>]+", "", raw).strip()
@@ -1216,11 +993,9 @@ async def chat_with_tools(user_msg: str, history: Optional[List[HistoryMessage]]
     contents: List[Content] = []
     if history:
         for h in history:
-            role_from_frontend = h.sender # <-- CORREÇÃO (era h.get("role", ...))
+            role_from_frontend = h.sender
             gemini_role = "model" if role_from_frontend == "ai" else "user"
-            
-            text_content = h.content.conteudo_texto # <-- CORREÇÃO (era h.get("content", ...))
-    
+            text_content = h.content.conteudo_texto
             contents.append(Content(role=gemini_role, parts=[Part.from_text(text_content)]))
     contents.append(Content(role="user", parts=[Part.from_text(user_msg)]))
     tools = [toolset()]
@@ -1288,7 +1063,7 @@ async def tasks_from_xlsx(
     projeto_descricao: Optional[str] = Form(None),
     projeto_categoria: Optional[str] = Form(None),
     xlsx_url: Optional[str] = Form(None),
-    google_sheet_url: Optional[str] = Form(None), # <-- NOVO CAMPO
+    google_sheet_url: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None)
 ):
     file_bytes = await file.read() if file else None
@@ -1314,10 +1089,13 @@ async def tasks_from_xlsx(
         create_project_flag=create_project_flag, projeto_situacao=projeto_situacao,
         projeto_prazo=projeto_prazo, projeto_responsavel=projeto_responsavel,
         projeto_descricao=projeto_descricao, projeto_categoria=projeto_categoria,
-        xlsx_url=effective_xlsx_url, # Passa a URL (original ou GSheet-export)
-        file_bytes=file_bytes       # Passa o arquivo (se houver)
+        xlsx_url=effective_xlsx_url,
+        file_bytes=file_bytes
     )
     return result
+
+# --- ESTA É A FUNÇÃO (V9) QUE IMPLEMENTA O SEU PLANO ---
+# --- (USA O MODELO DE FOTOS E O NOVO PROMPT) ---
 
 @app.post("/ai/chat-with-pdf")
 async def ai_chat_with_pdf(
@@ -1332,13 +1110,14 @@ async def ai_chat_with_pdf(
     Endpoint de chat que "lê" um PDF enviado e usa o conteúdo
     como contexto para responder a pergunta do usuário.
     
-    CORRIGIDO (v8): A ferramenta 'solve_pdf_enigma' agora envia os BYTES
-    do PDF (pdf_bytes) diretamente para a IA (OCR), em vez de
-    extrair o texto (que estava corrompido).
+    CORRIGIDO (V9): Voltamos ao modelo (ex: 2.0-flash) e
+    agora convertemos as páginas do PDF em IMAGENS (PNG)
+    para que o modelo possa "ler" (OCR) o enigma corretamente.
     """
     try:
         pdf_bytes = await file.read()
         
+        # O texto ainda é extraído para RAG (perguntas normais)
         raw_pdf_text = extract_full_pdf_text(pdf_bytes)
         rag_text = clean_pdf_text(raw_pdf_text)
         
@@ -1388,32 +1167,58 @@ async def ai_chat_with_pdf(
             call = resp.candidates[0].content.parts[0].function_call
             
             if call.name == "solve_pdf_enigma":
-                                                
+                                
+                # --- ESTA É A LÓGICA DE "FOTOS" QUE VOCÊ PEDIU ---
+                
+                # --- ESTE É O NOVO PROMPT QUE VOCÊ PEDIU ---
                 enigma_prompt_text = f"""
                 Você é um especialista em decifrar enigmas.
-                O documento PDF anexo contém uma mensagem secreta.
-                A mensagem está escondida usando letras maiúsculas "fora de lugar" (no meio de palavras minúsculas ou em palavras TitleCase no meio de frases).
+                As IMAGENS ANEXAS são páginas de um documento PDF.
+                Uma mensagem secreta está escondida nelas, usando letras maiúsculas "fora de lugar" (ex: 'contribUI' ou 'custO').
 
-                Sua tarefa é ler o PDF (usando OCR), encontrar essas letras e formar a mensagem secreta.
+                Sua tarefa é ler as imagens (usando OCR), encontrar essas letras e formar a mensagem secreta.
                 
                 REGRAS IMPORTANTES:
-                1. Ignore siglas (palavras 100% maiúsculas, como ISO ou SUS).
-                2. Ignore letras maiúsculas normais no início de frases (como "Para", "A coordenação", "No controle").
-                3. Junte as letras que encontrar para formar PALAVRAS de verdade (ex: 'EQ', 'UI', 'PE' devem ser 'EQUIPE').
-                4. Retorne APENAS a frase secreta completa, e nada mais.
+                1.  Leia as imagens, palavra por palavra.
+                2.  Encontre TODAS as palavras que contêm letras maiúsculas "fora do padrão" (ex: 'EQuilibra', 'contribUI', 'custO').
+                3.  IGNORE palavras que são siglas (100% maiúsculas, como ISO ou SUS).
+                4.  IGNORE palavras que são inícios normais de frase (como "Para", "A coordenação", "No controle", "Texto.1").
+                5.  Extraia APENAS as letras maiúsculas das palavras que você encontrou (ex: 'contribUI' -> 'UI', 'custO' -> 'O').
+                6.  Coloque todas as letras maiúsculas que você extraiu em fila, em ordem.
+                7.  Descubra as palavras em português que essa fila de letras forma.
+                8.  Retorne APENAS a frase secreta completa e montada, e NADA MAIS.
+
+                (Por exemplo: se você encontrar 'EQuilibra', 'contribUI' e 'imPErfecções', você deve juntá-las e começar sua resposta com 'EQUIPE'.)
 
                 Qual é a mensagem secreta?
                 """
                 
+                # Criamos a parte do texto
                 enigma_part_texto = Part.from_text(enigma_prompt_text)
-                enigma_part_pdf = Part.from_data(
-                    data=pdf_bytes, # <-- Enviando os bytes do PDF
-                    mime_type="application/pdf"
-                )
                 
-                enigma_contents = [Content(role="user", parts=[enigma_part_texto, enigma_part_pdf])]
+                # Criamos as "fotos" (imagens PNG) do PDF
+                image_parts = []
+                try:
+                    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+                        for page in doc:
+                            # Renderiza a página como uma imagem PNG
+                            pix = page.get_pixmap(dpi=150) # Resolução média
+                            img_bytes = pix.tobytes("png")
+                            image_parts.append(Part.from_data(
+                                data=img_bytes,
+                                mime_type="image/png"
+                            ))
+                except Exception as e_img:
+                    print(f"Erro ao converter PDF para imagens: {e_img}")
+                    raise HTTPException(status_code=500, detail=f"Erro ao processar PDF para OCR: {e_img}")
                 
-                enigma_resp = model.generate_content(enigma_contents, tools=[]) # Sem ferramentas
+                if not image_parts:
+                    raise HTTPException(status_code=422, detail="Não foi possível converter o PDF em imagens para análise.")
+
+                # Enviamos o prompt E as imagens
+                enigma_contents = [Content(role="user", parts=[enigma_part_texto] + image_parts)]
+                
+                enigma_resp = model.generate_content(enigma_contents, tools=[])
                 
                 message = "Nenhuma mensagem secreta encontrada."
                 if enigma_resp.candidates and enigma_resp.candidates[0].content and enigma_resp.candidates[0].content.parts:
@@ -1423,7 +1228,7 @@ async def ai_chat_with_pdf(
                 final_answer = _normalize_answer(f"A frase secreta encontrada no arquivo é: {message}", nome_usuario_fmt)
                 
                 tool_step_log = {
-                    "call": {"name": "solve_pdf_enigma (via LLM-OCR)", "args": {"file": file.filename}},
+                    "call": {"name": "solve_pdf_enigma (via Image-OCR)", "args": {"file": file.filename}},
                     "result": {"ok": True, "data": message}
                 }
                 
@@ -1434,6 +1239,7 @@ async def ai_chat_with_pdf(
                 }
                 return JSONResponse(response_data)
             
+        # Lógica de fallback para RAG (perguntas normais)
         final_text = ""
         if resp.candidates and resp.candidates[0].content and resp.candidates[0].content.parts:
             final_text = getattr(resp.candidates[0].content.parts[0], "text", "") or ""
@@ -1460,7 +1266,7 @@ async def pdf_extract_text(file: UploadFile = File(...), _ = Depends(require_api
     Endpoint utilitário: Envie um PDF e receba o texto completo.
     """
     pdf_bytes = await file.read()
-    text = extract_full_pdf_text(pdf_bytes) # Usará a nova função (fitz)
+    text = extract_full_pdf_text(pdf_bytes)
     return {"filename": file.filename, "text": text}
 
 @app.post("/pdf/solve-enigma")
@@ -1470,8 +1276,8 @@ async def pdf_solve_enigma(file: UploadFile = File(...), _ = Depends(require_api
     (NOTA: Este endpoint ainda usa a função Python antiga, que pode falhar)
     """
     pdf_bytes = await file.read()
-    text = extract_full_pdf_text(pdf_bytes) # Usará a nova função (fitz)
-    message = extract_hidden_message(text) # A função antiga (python)
+    text = extract_full_pdf_text(pdf_bytes)
+    message = extract_hidden_message(text)
     return {"filename": file.filename, "message": message or "Nenhuma mensagem encontrada."}
 
 @app.get("/")
@@ -1484,4 +1290,3 @@ def root():
         "location": LOCATION,
         "main_api_target": TASKS_API_BASE,
     }
-# O '}' extra que causava o SyntaxError foi removido
