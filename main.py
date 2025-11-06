@@ -1175,6 +1175,7 @@ async def chat_with_tools(user_msg: str, history: Optional[List[HistoryMessage]]
             
     return {"answer": _normalize_answer("Concluí as ações solicitadas.", nome_usuario), "tool_steps": tool_steps}
 
+#
 async def handle_pdf_chat_from_context(req: ChatRequest, context_doc: Dict[str, Any]) -> JSONResponse:
     """
     Processa uma pergunta de chat contra um contexto de texto já salvo (do Mongo).
@@ -1235,10 +1236,27 @@ async def handle_pdf_chat_from_context(req: ChatRequest, context_doc: Dict[str, 
                 else:
                     cleanup_prompt = f"""
                     Minha função Python extraiu a seguinte frase secreta literal: "{secret_message_raw}"
-                    Sua tarefa é formatar esta frase... (etc.)
-                    ...
+                    
+                    Sua tarefa é formatar esta frase para que ela se torne legível em português, seguindo regras MUITO ESTRITAS:
+                    
+                    1.  **Ordem e Letras:** A ordem das letras e as próprias letras NÃO PODEM MUDAR.
+                        (Exemplo: O bloco 'EQ UI PE' deve se tornar 'EQUIPE'. O 'Q' não pode ser inventado. O 'E' inicial não pode virar 'É'.)
+                    2.  **Acentuação:** Adicione a acentuação correta onde necessário. (Ex: 'VOCES' -> 'VOCÊS', 'SAO' -> 'SÃO').
+                    3.  **Sem Pontuação:** NÃO adicione NENHUMA pontuação (vírgulas, pontos de exclamação, etc.). A saída deve ser "texto liso".
+                    4.  **Caixa Alta:** A saída final deve ser TODA EM MAIÚSCULAS.
+                    5.  **Palavras Estrangeiras:** PODE HAVER palavras estrangeiras (ex: 'TEAM', 'PROJECT', INNOVATION, etc.), mas mantenha a acentuação e caixa alta conforme as regras acima; se atente ao contexto para descobrir se é uma palavra estrangeira ou brasileira.
+                    
+                    Frase Bruta: "{secret_message_raw}"
+                    Transforme isso em uma frase limpa, em português, toda em maiúsculas, sem pontuação.
+                    
+                    Exemplo de 'antes' e 'depois':
+                    - Antes: "EQ UI PE VO C E S PA SS AR AM"
+                    - Depois: "EQUIPE VOCÊS PASSARAM"
+                    
                     Responda APENAS com a frase final limpa.
                     """
+                    
+                    print("[DEBUG-V16-Context] Chamando IA (Gemini) para limpeza ESTRITA...")
                     cleanup_contents = [Content(role="user", parts=[Part.from_text(cleanup_prompt)])]
                     cleanup_resp = model.generate_content(cleanup_contents, tools=[])
                     
@@ -1247,8 +1265,10 @@ async def handle_pdf_chat_from_context(req: ChatRequest, context_doc: Dict[str, 
                         final_answer_cleaned = getattr(cleanup_resp.candidates[0].content.parts[0], "text", "").strip()
 
                     if not final_answer_cleaned:
+                        print("[DEBUG-V15-Context] IA de limpeza falhou. Retornando frase bruta.")
                         final_answer = f"A frase secreta encontrada no arquivo é: {secret_message_raw}"
                     else:
+                        print(f"[DEBUG-V15-Context] IA de limpeza retornou: {final_answer_cleaned}")
                         final_answer = f"A frase secreta encontrada no arquivo é: {final_answer_cleaned}"
 
                 final_answer = _normalize_answer(final_answer, nome_usuario_fmt)
@@ -1276,7 +1296,7 @@ async def handle_pdf_chat_from_context(req: ChatRequest, context_doc: Dict[str, 
         return JSONResponse(response_data)
     except Exception as e:
         return JSONResponse(
-            status_code=200,
+            status_code=200, # O frontend espera um 200
             content={
                 "tipo_resposta": "TEXTO",
                 "conteudo_texto": f"Desculpe, tive um erro ao processar sua pergunta sobre o arquivo: {str(e)}",
