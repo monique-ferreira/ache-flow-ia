@@ -1,6 +1,3 @@
-# main.py (V16 - Lógica Híbrida + Roteador XLSX)
-# IA (Ferramenta) detecta intenção.
-# Python (extract_hidden_message) executa a lógica.
 import os, io, re, time, asyncio, json
 from typing import List, Optional, Dict, Any, Tuple
 from urllib.parse import urlparse, parse_qs, unquote, quote, urljoin
@@ -85,7 +82,7 @@ DEFAULT_TOP_K = 8
 # =========================
 # FastAPI App (Único)
 # =========================
-app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="15.0.0")
+app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="17.0.0")
 
 origins = [
     "http://localhost:5173",
@@ -934,6 +931,51 @@ async def solve_pdf_enigma_from_url_impl(url: str) -> str:
     except Exception as e:
         return f"Erro ao processar enigma do PDF: {str(e)}"
 
+async def _get_first_pdf_url_from_xlsx_url(url: str) -> str:
+    """
+    Helper (V17): Baixa um XLSX/GoogleSheet de uma URL, lê,
+    e retorna o *primeiro* link de PDF encontrado.
+    """
+    sheet_id = extract_gsheet_id(url)
+    effective_xlsx_url = url
+    if sheet_id:
+        effective_xlsx_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
+    
+    try:
+        xlsx_bytes = fetch_bytes(effective_xlsx_url) # Re-usa função existente
+        df = xlsx_bytes_to_dataframe_preserving_hyperlinks(xlsx_bytes) # Re-usa função existente
+    except Exception as e:
+        raise ValueError(f"Não foi possível baixar ou ler o arquivo XLSX da URL: {str(e)}")
+
+    if "Documento Referência" not in df.columns:
+        raise ValueError("O XLSX não tem a coluna 'Documento Referência'.")
+        
+    for pdf_url in df["Documento Referência"]:
+        if pdf_url and str(pdf_url).lower().startswith("http") and ".pdf" in str(pdf_url).lower():
+            return str(pdf_url) # Retorna o primeiro link de PDF válido
+            
+    raise ValueError("Não encontrei nenhum link de PDF válido na coluna 'Documento Referência' do arquivo.")
+
+async def get_pdf_content_from_xlsx_url_impl(url: str) -> str:
+    """
+    Tool Impl (V17): Pega URL de XLSX, acha URL de PDF dentro, e lê o texto.
+    """
+    try:
+        pdf_url = await _get_first_pdf_url_from_xlsx_url(url)
+        return await get_pdf_content_from_url_impl(pdf_url) # Re-usa função existente
+    except Exception as e:
+        return str(e)
+
+async def solve_enigma_from_xlsx_url_impl(url: str) -> str:
+    """
+    Tool Impl (V17): Pega URL de XLSX, acha URL de PDF dentro, e resolve o enigma.
+    """
+    try:
+        pdf_url = await _get_first_pdf_url_from_xlsx_url(url)
+        return await solve_pdf_enigma_from_url_impl(pdf_url) # Re-usa função existente
+    except Exception as e:
+        return str(e)
+
 def toolset() -> Tool:
     fns = [
         FunctionDeclaration(name="count_all_projects", description="Conta e retorna o número total de projetos.", parameters={"type": "object", "properties": {}}),
@@ -956,8 +998,20 @@ def toolset() -> Tool:
         FunctionDeclaration(name="find_project_responsavel", description="Encontra o nome do responsável por um projeto (busca por nome exato).", parameters={"type": "object", "properties": {"project_name": {"type": "string"}}, "required": ["project_name"]}),
         FunctionDeclaration(name="count_tasks_in_project", description="Conta o número de tarefas em um projeto (busca por nome exato).", parameters={"type": "object", "properties": {"project_name": {"type": "string"}}, "required": ["project_name"]}),
         FunctionDeclaration(name="list_tasks_by_project_name", description="Lista as N primeiras tarefas de um projeto (busca por nome exato).", parameters={"type": "object", "properties": {"project_name": {"type": "string"}, "top_k": {"type": "integer"}}, "required": ["project_name"]}),
+        
         FunctionDeclaration(name="get_pdf_content_from_url", description="Extrai e retorna todo o texto de um arquivo PDF hospedado em uma URL. Use isso para 'ler' ou 'analisar' um PDF.", parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
         FunctionDeclaration(name="solve_pdf_enigma_from_url", description="Encontra uma 'frase secreta' escondida em um PDF (letras maiúsculas fora de lugar) a partir de uma URL.", parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
+
+        FunctionDeclaration(
+            name="get_pdf_content_from_xlsx_url", 
+            description="Extrai o texto de um PDF que está LINKADO DENTRO de um arquivo .xlsx ou Google Sheets. Use se o usuário fornecer uma URL de planilham, mas pedir para 'ler o PDF' ou 'resumir o PDF'.", 
+            parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}
+        ),
+        FunctionDeclaration(
+            name="solve_enigma_from_xlsx_url", 
+            description="Resolve um enigma de um PDF que está LINKADO DENTRO de um arquivo .xlsx ou Google Sheets. Use se o usuário fornecer uma URL de planilha e pedir o 'enigma' ou 'frase secreta'.", 
+            parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}
+        ),
     ]
     return Tool(function_declarations=fns)
 
@@ -983,8 +1037,17 @@ async def exec_tool(name: str, args: Dict[str, Any], user_id: Optional[str] = No
         if name == "create_task": return {"ok": True, "data": await create_task(args)}
         if name == "update_task": return {"ok": True, "data": await update_task(args["task_id"], args.get("patch", {}))}
         if name == "import_project_from_url": return {"ok": True, "data": await import_project_from_url_tool(**args, user_id=user_id)}
+        
+        # PDF Direto
         if name == "get_pdf_content_from_url": return {"ok": True, "data": await get_pdf_content_from_url_impl(args["url"])}
         if name == "solve_pdf_enigma_from_url": return {"ok": True, "data": await solve_pdf_enigma_from_url_impl(args["url"])}
+
+        # ====================================================================
+        # ================== NOVOS IFS ADICIONADOS ABAIXO ====================
+        # ====================================================================
+        if name == "get_pdf_content_from_xlsx_url": return {"ok": True, "data": await get_pdf_content_from_xlsx_url_impl(args["url"])}
+        if name == "solve_enigma_from_xlsx_url": return {"ok": True, "data": await solve_enigma_from_xlsx_url_impl(args["url"])}
+
         return {"ok": False, "error": f"função desconhecida: {name}"}
     except Exception as e:
         detail = str(e)
@@ -1351,7 +1414,7 @@ async def ai_chat_with_xlsx(
         pdf_url = task_row.get("Documento Referência")
         
         if not pdf_url or not str(pdf_url).lower().startswith("http"):
-             raise HTTPException(status_code=404, detail=f"A tarefa '{task_name}' não possui um link de PDF válido no arquivo.")
+             raise HTTPException(status_code=4404, detail=f"A tarefa '{task_name}' não possui um link de PDF válido no arquivo.")
 
         final_answer = ""
         tool_steps = []
