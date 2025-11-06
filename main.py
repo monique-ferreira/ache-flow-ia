@@ -1175,16 +1175,16 @@ async def chat_with_tools(user_msg: str, history: Optional[List[HistoryMessage]]
             
     return {"answer": _normalize_answer("Concluí as ações solicitadas.", nome_usuario), "tool_steps": tool_steps}
 
-#
-async def handle_pdf_chat_from_context(req: ChatRequest, context_doc: Dict[str, Any]) -> JSONResponse:
+async def handle_file_chat_from_context(req: ChatRequest, context_doc: Dict[str, Any]) -> JSONResponse:
     """
     Processa uma pergunta de chat contra um contexto de texto já salvo (do Mongo).
-    Esta função contém a lógica de RAG e Enigma.
+    Esta função contém a lógica de RAG e Enigma (Enigma APENAS para PDF).
     """
     pergunta = req.pergunta
-    raw_pdf_text = context_doc.get("text_content", "")
+    raw_file_text = context_doc.get("text_content", "")
     context_filename = context_doc.get("filename", "o arquivo")
-
+    context_type = context_doc.get("context_type", "pdf") 
+    
     nome_usuario_fmt = req.nome_usuario or "você"
     email_usuario_fmt = req.email_usuario or "email.desconcido"
     id_usuario_fmt = req.id_usuario or "id.desconhecido"
@@ -1199,9 +1199,21 @@ async def handle_pdf_chat_from_context(req: ChatRequest, context_doc: Dict[str, 
         ]
         pdf_tool = Tool(function_declarations=pdf_tools_list)
 
-        rag_text = clean_pdf_text(raw_pdf_text)
+        tools_to_use = []
+        file_format_desc = "PDF"
+        
+        if context_type == "pdf" or context_type == "pdf_from_xlsx":
+            tools_to_use.append(pdf_tool)
+            rag_text = clean_pdf_text(raw_file_text)
+            file_format_desc = "PDF"
+        elif context_type == "xlsx":
+            rag_text = raw_file_text
+            file_format_desc = "CSV (de um XLSX)"
+        else:
+            rag_text = raw_file_text
+
         contexto_prompt = f"""
-        Você é um assistente. Use o CONTEÚDO DO DOCUMENTO abaixo (referente ao arquivo '{context_filename}') para responder a PERGUNTA DO USUÁRIO.
+        Você é um assistente. Use o CONTEÚDO DO DOCUMENTO abaixo (referente ao arquivo '{context_filename}', formato {file_format_desc}) para responder a PERGUNTA DO USUÁRIO.
         Responda APENAS com base no CONTEÚDO DO DOCUMENTO.
 
         ==================== CONTEÚDO DO DOCUMENTO ====================
@@ -1219,7 +1231,7 @@ async def handle_pdf_chat_from_context(req: ChatRequest, context_doc: Dict[str, 
         model = init_model(system_prompt_filled)
         contents = [Content(role="user", parts=[Part.from_text(contexto_prompt)])]
 
-        resp = model.generate_content(contents, tools=[pdf_tool])
+        resp = model.generate_content(contents, tools=tools_to_use)
 
         if (
             resp.candidates and resp.candidates[0].content and
@@ -1319,7 +1331,7 @@ async def ai_chat(req: ChatRequest, _=Depends(require_api_key)):
 
     if context_doc and context_doc.get("text_content"):
         print(f"[Context] Contexto encontrado para {req.id_usuario} (Tipo: {context_doc.get('context_type')}). Roteando para chat de PDF.")
-        return await handle_pdf_chat_from_context(req, context_doc)
+        return await handle_file_chat_from_context(req, context_doc)
     print(f"[Context] Contexto não encontrado para {req.id_usuario}. Roteando para chat geral.")
     
     out = await chat_with_tools(
@@ -1691,6 +1703,57 @@ async def ai_chat_with_xlsx(
                     final_answer = f"Tentei importar o projeto, mas falhei: {detail}"
                     tool_steps.append({"call": "import_from_file", "args": params, "result": {"error": detail}})    
         
+        elif intention == "rag" and not task_name:
+            print(f"[DEBUG-V18] Intenção: RAG GERAL (sobre o XLSX). Pergunta: {pergunta}")
+            
+            xlsx_text_content = df.to_csv(index=False)
+            if not xlsx_text_content.strip():
+                 raise HTTPException(status_code=400, detail="O arquivo XLSX parece estar vazio ou não pude lê-lo.")
+
+            try:
+                db = mongo()
+                db[COLL_CONTEXTOS].update_one(
+                    {"user_id": id_usuario_fmt},
+                    {"$set": {
+                        "user_id": id_usuario_fmt,
+                        "context_type": "xlsx", # Novo tipo de contexto
+                        "text_content": xlsx_text_content, # Salva o CSV
+                        "filename": file.filename,
+                        "updated_at": today()
+                    }},
+                    upsert=True
+                )
+                print(f"[Context] Contexto XLSX GERAL salvo para {id_usuario_fmt} (Arquivo: {file.filename}).")
+            except Exception as e:
+                print(f"[Context] FALHA ao salvar contexto XLSX GERAL para {id_usuario_fmt}: {e}")
+
+            rag_prompt = f"""
+            Use o CONTEÚDO DO DOCUMENTO XLSX abaixo (formatado como CSV) para responder a PERGUNTA DO USUÁRIO.
+            Responda APENAS com base no CONTEÚDO DO DOCUMENTO.
+
+            ==================== CONTEÚDO DO DOCUMENTO (CSV) ====================
+            {xlsx_text_content[:10000]} 
+            =====================================================================
+
+            PERGUNTA DO USUÁRIO: {pergunta}
+            """
+            
+            data_hoje, (inicio_mes, fim_mes) = iso_date(today()), month_bounds(today())
+            system_prompt_filled = SYSTEM_PROMPT.format(
+                nome_usuario=nome_usuario_fmt, 
+                email_usuario=email_usuario_fmt, 
+                id_usuario=id_usuario_fmt,
+                data_hoje=data_hoje, inicio_mes=inicio_mes, fim_mes=fim_mes,
+            )
+            rag_model = init_model(system_prompt_filled)
+            rag_resp = rag_model.generate_content([rag_prompt], tools=[])
+            
+            if rag_resp.candidates and rag_resp.candidates[0].content and rag_resp.candidates[0].content.parts:
+                final_answer = getattr(rag_resp.candidates[0].content.parts[0], "text", "Não encontrei a resposta no documento.")
+            else:
+                final_answer = "Não encontrei a resposta no documento."
+            tool_steps.append({"call": "RAG_on_XLSX_General", "args": {"pergunta": pergunta}, "result": final_answer})
+        
         elif not task_names:
             raise HTTPException(status_code=400, detail="A intenção não era 'importar', mas a planilha não tem uma coluna 'Nome' para que eu possa ler as tarefas.")
         elif not task_name or task_name not in task_names:
@@ -1700,7 +1763,7 @@ async def ai_chat_with_xlsx(
             if "Documento Referência" not in df.columns:
                 raise HTTPException(status_code=400, detail="O XLSX precisa da coluna 'Documento Referência' para RAG/Enigma.")
             task_row = df[df['Nome'] == task_name].iloc[0]
-            pdf_url = task_row.get("Documento Referência") 
+            pdf_url = task_row.get("Documento Referência")
             if not pdf_url or not str(pdf_url).lower().startswith("http"):
                 raise HTTPException(status_code=404, detail=f"A tarefa '{task_name}' não possui um link de PDF válido no arquivo.")
             
@@ -1777,7 +1840,7 @@ async def ai_chat_with_xlsx(
                         result = raw_result
                         final_answer = f"A frase secreta encontrada no PDF da tarefa '{task_name}' é: {raw_result}"
                     else:
-                        print("[DEBUG-V17-CLEANUP] IA de limpeza (Inline) retornou: {cleaned_result}")
+                        print(f"[DEBUG-V17-CLEANUP] IA de limpeza (Inline) retornou: {cleaned_result}")
                         result = cleaned_result
                         final_answer = f"A frase secreta encontrada no PDF da tarefa '{task_name}' é: {cleaned_result}"
                 tool_steps.append({"call": "solve_pdf_enigma_from_text", "args": {"task": task_name}, "result": result})
@@ -1816,7 +1879,7 @@ async def ai_chat_with_xlsx(
         })
     except Exception as e:
         raise e
-        
+            
 @app.post("/pdf/extract-text")
 async def pdf_extract_text(file: UploadFile = File(...), _ = Depends(require_api_key)):
     """
