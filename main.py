@@ -672,29 +672,6 @@ SYSTEM_PROMPT = """
 Você é o "Ache", um assistente de produtividade virtual da plataforma Ache Flow.
 Sua missão é ajudar colaboradores(as) como {nome_usuario} (email: {email_usuario}, id: {id_usuario}) a entender e gerenciar tarefas, projetos e prazos.
 ====================================================================
-REGRAS DE RESPOSTA (MAIS IMPORTANTE)
-====================================================================
-**REGRA DE OURO: NÃO INVENTE DADOS.**
-- Se uma ferramenta for usada e retornar uma lista vazia (como `[]`), um valor 0, "não encontrado", ou um erro, sua resposta DEVE ser "Não encontrei [o que foi pedido]" ou "Desculpe, não consegui processar isso. [Mensagem de Erro]".
-- NUNCA, SOB NENHUMA CIRCUNSTÂNCIA, invente nomes de projetos, tarefas, pessoas ou frases secretas.
-**REGRA ANTI-CÓDIGO: VOCÊ É UM ASSISTENTE, NÃO UM PROGRAMADOR.**
-- Sua resposta para o usuário NUNCA deve ser um trecho de código (`print()`, JSON, etc).
-- Sua tarefa é: 1º *chamar* a ferramenta, 2º *esperar* o resultado, e 3º *depois* formular uma resposta em português.
-- Se você responder com `print(defaultapi.createproject...)`, você falhou gravemente.
-- Você NUNCA deve inventar prefixos como `defaultapi` ou `print()`.
-1.  **REGRA DE FERRAMENTAS (PRIORIDADE 1):** Sua prioridade MÁXIMA é usar ferramentas.
-    * **REFORÇO CRÍTICO:** Ao 'criar', 'atualizar' ou 'importar', você está PROIBIDO de responder "Projeto criado" ou "Tarefa atualizada" sem ANTES chamar a ferramenta e receber a confirmação.
-    * **REGRA DE IMPORTAÇÃO (DESAMBIGUAÇÃO):** Se o usuário pedir para 'criar um projeto' E TAMBÉM fornecer uma URL (.xlsx ou Google Sheets) na *mesma* mensagem, ignore a ferramenta `create_project` e use APENAS a ferramenta `import_project_from_url`.
-    * NUNCA pergunte "Posso buscar?". Apenas execute a ferramenta e retorne a resposta.
-    * Sempre que usar uma ferramenta, resuma o resultado em português claro. NUNCA mostre nomes de funções (como 'list_all_projects') ou código.
-2.  **REGRA DE CONHECIMENTO GERAL (PRIORIDADE 2):** Se a pergunta NÃO PUDER ser respondida por NENHUMA ferramenta, use seu conhecimento pré-treinado.
-    * Você NÃO precisa de acesso à internet para isso. Responda diretamente.
-3.  **REGRA DE AMBIGUIDADE:** Se uma pergunta for ambígua (ex: "o que é um diferencial?"), responda com seu conhecimento geral.
-4.  **REGRA DE FORMATAÇÃO:**
-    * Fale sempre em português (PT-BR), de forma simpática.
-    * NUNCA use markdown, asteriscos (*), negrito, ou blocos de código.
-    * Use hífens simples para listas.
-====================================================================
 REGRAS DE COLETA DE DADOS (PARA CRIAR/EDITAR)
 ====================================================================
 Sua tarefa é preencher os argumentos para as ferramentas.
@@ -722,10 +699,33 @@ Sua tarefa é preencher os argumentos para as ferramentas.
 * **NÃO** pergunte pelo ID se o nome já foi dado. A ferramenta encontrará pelo nome.
 (O resto das regras de update_project, update_task e DADOS DE CONTEXTO permanecem iguais)
 ====================================================================
+REGRAS DE RESPOSTA (AGORA SECUNDÁRIAS)
+====================================================================
+**REGRA DE OURO: NÃO INVENTE DADOS.**
+- Se uma ferramenta for usada e retornar uma lista vazia (como `[]`), um valor 0, "não encontrado", ou um erro, sua resposta DEVE ser "Não encontrei [o que foi pedido]" ou "Desculpe, não consegui processar isso. [Mensagem de Erro]".
+- NUNCA, SOB NENHUMA CIRCUNSTÂNCIA, invente nomes de projetos, tarefas, pessoas ou frases secretas.
+**REGRA ANTI-CÓDIGO: VOCÊ É UM ASSISTENTE, NÃO UM PROGRAMADOR.**
+- Sua resposta para o usuário NUNCA deve ser um trecho de código (`print()`, JSON, etc).
+- Sua tarefa é: 1º *chamar* a ferramenta, 2º *esperar* o resultado, e 3º *depois* formular uma resposta em português.
+- Se você responder com `print(defaultapi.createproject...)`, você falhou gravemente.
+- Você NUNCA deve inventar prefixos como `defaultapi` ou `print()`.
+1.  **REGRA DE FERRAMENTAS (PRIORIDADE 1):** Sua prioridade MÁXIMA é usar ferramentas.
+    * **REFORÇO CRÍTICO:** Ao 'criar', 'atualizar' ou 'importar', você está PROIBIDO de responder "Projeto criado" ou "Tarefa atualizada" sem ANTES chamar a ferramenta e receber a confirmação.
+    * **REGRA DE IMPORTAÇÃO (DESAMBIGUAÇÃO):** Se o usuário pedir para 'criar um projeto' E TAMBÉM fornecer uma URL (.xlsx ou Google Sheets) na *mesma* mensagem, ignore a ferramenta `create_project` e use APENAS a ferramenta `import_project_from_url`.
+    * NUNCA pergunte "Posso buscar?". Apenas execute a ferramenta e retorne a resposta.
+    * Sempre que usar uma ferramenta, resuma o resultado em português claro. NUNCA mostre nomes de funções (como 'list_all_projects') ou código.
+2.  **REGRA DE CONHECIMENTO GERAL (PRIORIDADE 2):** Se a pergunta NÃO PUDER ser respondida por NENHUMA ferramenta, use seu conhecimento pré-treinado.
+    * Você NÃO precisa de acesso à internet para isso. Responda diretamente.
+3.  **REGRA DE AMBIGUIDADE:** Se uma pergunta for ambígua (ex: "o que é um diferencial?"), responda com seu conhecimento geral.
+4.  **REGRA DE FORMATAÇÃO:**
+    * Fale sempre em português (PT-BR), de forma simpática.
+    * NUNCA use markdown, asteriscos (*), negrito, ou blocos de código.
+    * Use hífens simples para listas.
+====================================================================
 DADOS DE CONTEXTO
 ====================================================================
 -   **Usuário Atual:** {nome_usuario} (ID: {id_usuario})
--   **Interpretação de "Eu":** Se o usuário disser "eu", "para mim", "sou eu", use a palavra "eu" no campo 'responsavel'. A ferramenta `resolve_responsavel_id` entenderá.
+-   **Interpretação de "Eu":** Se o usuário disser "eu", "para mim", "sou eu", **E NENHUM OUTRO NOME FOR DADO**, use a palavra "eu" no campo 'responsavel'. Se um nome explícito (ex: "Lucas Rodrigues") for fornecido, ele tem prioridade.
 -   **Datas:** Hoje é {data_hoje}. "Este mês" vai de {inicio_mes} até {fim_mes}.
 -   **Formato de Data:** Sempre que pedir uma data, peça em **DD-MM-AAAA**. Você deve converter internamente para **AAAA-MM-DD** antes de usar nas ferramentas.
 """
@@ -1394,123 +1394,160 @@ async def ai_chat_with_xlsx(
     _ = Depends(require_api_key)
 ):
     """
-    Endpoint de chat (V16 - Lógica Híbrida com XLSX)
+    Endpoint de chat (V17 - Lógica Híbrida com XLSX)
     
     1. Recebe um XLSX e uma pergunta.
-    2. Identifica a qual TAREFA a pergunta se refere.
-    3. Busca o hiperlink do PDF para aquela tarefa.
-    4. Executa a lógica de RAG ou Enigma naquele PDF.
+    2. Identifica a intenção: "import", "enigma", ou "rag".
+    3. Se "import", tenta extrair dados do projeto da pergunta e criar o projeto.
+    4. Se "enigma" ou "rag", identifica a TAREFA e acha o link do PDF.
     """
     try:
         xlsx_bytes = await file.read()
-        
         df = xlsx_bytes_to_dataframe_preserving_hyperlinks(xlsx_bytes)
-        
         if "Nome" not in df.columns or "Documento Referência" not in df.columns:
-            raise HTTPException(status_code=400, detail="O XLSX precisa das colunas 'Nome' e 'Documento Referência'.")
-        
-        task_names = df["Nome"].dropna().unique().tolist()
-        task_map_str = "\n".join(f"- {name}" for name in task_names)
-
+            pass
+        task_names = []
+        if "Nome" in df.columns:
+            task_names = df["Nome"].dropna().unique().tolist()
+            task_map_str = "\n".join(f"- {name}" for name in task_names)
+        else:
+            task_map_str = "(Nenhuma coluna 'Nome' encontrada na planilha)"
         model = init_model("Você é um assistente de roteamento.")
-        
         prompt_identificacao = f"""
         O usuário fez a pergunta: "{pergunta}"
-        
-        O XLSX contém estas tarefas:
+        Ele também anexou um arquivo XLSX.
+        O XLSX contém (potencialmente) estas tarefas:
         {task_map_str}
-        
         Analise a pergunta e me retorne um JSON com:
-        1. "task_name": O nome exato da tarefa da lista que o usuário mencionou (ou null se não for claro).
-        2. "intention": "enigma" (se a pergunta for sobre enigma, frase secreta, etc.) ou "rag" (para qualquer outra pergunta, como resumir ou buscar).
+        1. "task_name": O nome exato da tarefa da lista que o usuário mencionou (ou null se não for claro ou se a intenção for 'importar').
+        2. "intention": "enigma" (se a pergunta for sobre enigma, frase secreta, etc.), "import" (se a pergunta for sobre 'importar', 'criar projeto', 'subir tarefas', 'adicionar da planilha'), ou "rag" (para qualquer outra pergunta, como resumir ou buscar).
         
         Responda APENAS com o JSON.
         """
-        
         resp = model.generate_content([prompt_identificacao], tools=[])
         response_text = "{}".strip()
         if resp.candidates and resp.candidates[0].content and resp.candidates[0].content.parts:
             response_text = getattr(resp.candidates[0].content.parts[0], "text", "{}").replace("`", "").replace("json", "").strip()
-        
         try:
             route_info = json.loads(response_text)
             task_name = route_info.get("task_name")
             intention = route_info.get("intention", "rag")
         except Exception:
-            raise HTTPException(status_code=400, detail="Não consegui entender a qual tarefa você se refere.")
-
-        if not task_name or task_name not in task_names:
-            raise HTTPException(status_code=404, detail=f"Não consegui identificar uma tarefa válida da sua planilha na sua pergunta.")
-
-        task_row = df[df['Nome'] == task_name].iloc[0]
-        pdf_url = task_row.get("Documento Referência")
-        
-        if not pdf_url or not str(pdf_url).lower().startswith("http"):
-             raise HTTPException(status_code=4404, detail=f"A tarefa '{task_name}' não possui um link de PDF válido no arquivo.")
-
+            raise HTTPException(status_code=400, detail="Não consegui entender sua intenção (importar, ler, etc.).")
         final_answer = ""
         tool_steps = []
         nome_usuario_fmt = nome_usuario or "você"
-
-        if intention == "enigma":
-            print(f"[DEBUG-V16] Intenção: ENIGMA. PDF: {pdf_url}")
+        if intention == "import":
+            print(f"[DEBUG-V17] Intenção: IMPORT. Pergunta: {pergunta}")
+            extract_prompt = f"""
+            O usuário quer importar um projeto usando o arquivo XLSX anexado.
+            Extraia os seguintes parâmetros da pergunta dele: "{pergunta}"
             
-            result = await solve_pdf_enigma_from_url_impl(pdf_url)
-            final_answer = f"A resposta para o enigma no PDF da tarefa '{task_name}' é: {result}"
-            tool_steps.append({"call": "solve_pdf_enigma_from_url", "args": {"url": pdf_url}, "result": result})
-
-        else:
-            print(f"[DEBUG-V16] Intenção: RAG. PDF: {pdf_url}")
+            - "projeto_nome": (string)
+            - "projeto_situacao": (string)
+            - "projeto_prazo": (string, formato DD-MM-AAAA)
+            - "projeto_responsavel": (string, nome ou email)
+            - "projeto_descricao": (string, opcional)
+            - "projeto_categoria": (string, opcional)
             
-            pdf_content_raw = await get_pdf_content_from_url_impl(pdf_url)
-            
-            if "Erro ao processar PDF" in pdf_content_raw:
-                 raise HTTPException(status_code=500, detail=f"Erro ao ler o PDF da tarefa '{task_name}': {pdf_content_raw}")
-
-            pdf_content = clean_pdf_text(pdf_content_raw)
-            
-            if not pdf_content:
-                raise HTTPException(status_code=500, detail=f"Consegui baixar o PDF da tarefa '{task_name}', mas não extraí texto dele.")
-
-            rag_prompt = f"""
-            Use o CONTEÚDO DO DOCUMENTO abaixo (referente à tarefa '{task_name}') para responder a PERGUNTA DO USUÁRIO.
-            
-            ==================== CONTEÚDO DO DOCUMENTO ====================
-            {pdf_content[:10000]}
-            ===============================================================
-
-            PERGUNTA DO USUÁRIO: {pergunta}
+            Responda APENAS com um JSON com os valores que encontrar. Use null se não encontrar.
             """
-            
-            data_hoje, (inicio_mes, fim_mes) = iso_date(today()), month_bounds(today())
-            
-            system_prompt_filled = SYSTEM_PROMPT.format(
-                nome_usuario=nome_usuario_fmt, 
-                email_usuario=(email_usuario or "email.desconhecido"), 
-                id_usuario=(id_usuario or "id.desconhecido"),
-                data_hoje=data_hoje, inicio_mes=inicio_mes, fim_mes=fim_mes,
-            )
-            rag_model = init_model(system_prompt_filled)
-            rag_resp = rag_model.generate_content([rag_prompt], tools=[])
-            
-            if rag_resp.candidates and rag_resp.candidates[0].content and rag_resp.candidates[0].content.parts:
-                final_answer = getattr(rag_resp.candidates[0].content.parts[0], "text", "Não encontrei a resposta no documento.")
+            extract_resp = model.generate_content([extract_prompt], tools=[])
+            params_json_str = "{}"
+            if extract_resp.candidates and extract_resp.candidates[0].content and extract_resp.candidates[0].content.parts:
+                params_json_str = getattr(extract_resp.candidates[0].content.parts[0], "text", "{}").replace("`", "").replace("json", "").strip()
+            try:
+                params = json.loads(params_json_str)
+            except Exception:
+                params = {}
+            required = {"projeto_nome", "projeto_situacao", "projeto_prazo", "projeto_responsavel"}
+            missing = [r for r in required if not params.get(r)]          
+            if missing:
+                missing_str = ", ".join(missing)
+                final_answer = f"Entendi que você quer importar esse arquivo! Para importar, preciso que você me envie o arquivo E, na *mesma* mensagem, me diga o nome do projeto, situação, prazo (DD-MM-AAAA) e o responsável. Campos faltando: {missing_str}."
+                tool_steps.append({"call": "import_from_file", "args": params, "result": {"error": "missing_fields", "missing": missing}})
             else:
-                 final_answer = "Não encontrei a resposta no documento."
-
-            tool_steps.append({"call": "RAG_on_XLSX_PDF", "args": {"url": pdf_url, "pergunta": pergunta}, "result": final_answer})
-
+                try:
+                    prazo_fmt = _parse_date_robust(params.get("projeto_prazo"))
+                    result = await tasks_from_xlsx_logic(
+                        projeto_id=None,
+                        projeto_nome=params.get("projeto_nome"),
+                        user_id=id_usuario,
+                        create_project_flag=1,
+                        projeto_situacao=params.get("projeto_situacao"),
+                        projeto_prazo=prazo_fmt,
+                        projeto_responsavel=params.get("projeto_responsavel"),
+                        projeto_descricao=params.get("projeto_descricao"),
+                        projeto_categoria=params.get("projeto_categoria"),
+                        xlsx_url=None,
+                        file_bytes=xlsx_bytes
+                    )                    
+                    total = result.get('total', 0)
+                    erros = len(result.get('erros', []))
+                    final_answer = f"Projeto '{params.get('projeto_nome')}' criado com sucesso a partir do arquivo! Foram importadas {total} tarefas, com {erros} erros."
+                    tool_steps.append({"call": "import_from_file", "args": params, "result": result})                
+                except Exception as e:
+                    detail = str(e)
+                    if isinstance(e, HTTPException): detail = e.detail
+                    elif isinstance(e, httpx.HTTPStatusError):
+                        try: detail = e.response.json().get("detail", str(e))
+                        except Exception: detail = e.response.text
+                    final_answer = f"Tentei importar o projeto, mas falhei: {detail}"
+                    tool_steps.append({"call": "import_from_file", "args": params, "result": {"error": detail}})    
+        elif not task_names:
+            raise HTTPException(status_code=400, detail="A intenção não era 'importar', mas a planilha não tem uma coluna 'Nome' para que eu possa ler as tarefas.")
+        elif not task_name or task_name not in task_names:
+            raise HTTPException(status_code=404, detail=f"Não consegui identificar uma tarefa válida da sua planilha na sua pergunta. A intenção era 'ler' ou 'enigma'?")
+        else:
+            if "Documento Referência" not in df.columns:
+                raise HTTPException(status_code=400, detail="O XLSX precisa da coluna 'Documento Referência' para RAG/Enigma.")
+            task_row = df[df['Nome'] == task_name].iloc[0]
+            pdf_url = task_row.get("Documento Referência") 
+            if not pdf_url or not str(pdf_url).lower().startswith("http"):
+                raise HTTPException(status_code=404, detail=f"A tarefa '{task_name}' não possui um link de PDF válido no arquivo.")
+            if intention == "enigma":
+                print(f"[DEBUG-V17] Intenção: ENIGMA. PDF: {pdf_url}")
+                result = await solve_pdf_enigma_from_url_impl(pdf_url)
+                final_answer = f"A resposta para o enigma no PDF da tarefa '{task_name}' é: {result}"
+                tool_steps.append({"call": "solve_pdf_enigma_from_url", "args": {"url": pdf_url}, "result": result})
+            else:
+                print(f"[DEBUG-V17] Intenção: RAG. PDF: {pdf_url}")
+                pdf_content_raw = await get_pdf_content_from_url_impl(pdf_url)      
+                if "Erro ao processar PDF" in pdf_content_raw:
+                    raise HTTPException(status_code=500, detail=f"Erro ao ler o PDF da tarefa '{task_name}': {pdf_content_raw}")
+                pdf_content = clean_pdf_text(pdf_content_raw)
+                if not pdf_content:
+                    raise HTTPException(status_code=500, detail=f"Consegui baixar o PDF da tarefa '{task_name}', mas não extraí texto dele.")
+                rag_prompt = f"""
+                Use o CONTEÚDO DO DOCUMENTO abaixo (referente à tarefa '{task_name}') para responder a PERGUNTA DO USUÁRIO.
+                ==================== CONTEÚDO DO DOCUMENTO ====================
+                {pdf_content[:10000]}
+                ===============================================================
+                PERGUNTA DO USUÁRIO: {pergunta}
+                """                
+                data_hoje, (inicio_mes, fim_mes) = iso_date(today()), month_bounds(today())
+                system_prompt_filled = SYSTEM_PROMPT.format(
+                    nome_usuario=nome_usuario_fmt, 
+                    email_usuario=(email_usuario or "email.desconhecido"), 
+                    id_usuario=(id_usuario or "id.desconhecido"),
+                    data_hoje=data_hoje, inicio_mes=inicio_mes, fim_mes=fim_mes,
+                )
+                rag_model = init_model(system_prompt_filled)
+                rag_resp = rag_model.generate_content([rag_prompt], tools=[])                
+                if rag_resp.candidates and rag_resp.candidates[0].content and rag_resp.candidates[0].content.parts:
+                    final_answer = getattr(rag_resp.candidates[0].content.parts[0], "text", "Não encontrei a resposta no documento.")
+                else:
+                    final_answer = "Não encontrei a resposta no documento."
+                tool_steps.append({"call": "RAG_on_XLSX_PDF", "args": {"url": pdf_url, "pergunta": pergunta}, "result": final_answer})
         final_answer_fmt = _normalize_answer(final_answer, nome_usuario_fmt)
-        
         return JSONResponse({
-            "tipo_resposta": "TEXTO_XLSX", # Novo tipo
+            "tipo_resposta": "TEXTO_XLSX",
             "conteudo_texto": final_answer_fmt,
             "dados": tool_steps
         })
-
     except Exception as e:
         raise e
-                        
+
 @app.post("/pdf/extract-text")
 async def pdf_extract_text(file: UploadFile = File(...), _ = Depends(require_api_key)):
     """
