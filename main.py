@@ -82,7 +82,7 @@ DEFAULT_TOP_K = 8
 # =========================
 # FastAPI App (Único)
 # =========================
-app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="18.0.0")
+app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="19.0.0")
 
 origins = [
     "http://localhost:5173",
@@ -640,24 +640,25 @@ async def tasks_from_xlsx_logic(
         preview.append({
             "titulo": str(row["Nome"]),
             "descricao": str(row.get("descricao_final") or ""),
-            "responsavel": str(row.get("Responsavel") or ""),
+            "responsavel": str(row.get("Responsavel") or ""), # <-- Isso será IGNORADO (propositalmente)
             "doc_ref": str(row.get("Documento Referência") or "").strip(),
             "prazo": prazo_col,
         })
     if not projeto_id and not projeto_nome:
         raise HTTPException(status_code=400, detail={"erro": "Para importar, forneça 'projeto_id' ou 'projeto_nome'."})
     async with httpx.AsyncClient() as client:
+        proj_resp_id_unificado = await resolve_responsavel_id(client, projeto_responsavel, default_user_id=user_id)
         resolved_project_id: Optional[str] = projeto_id
         if not resolved_project_id and projeto_nome:
             resolved_project_id = await find_project_id_by_name(client, projeto_nome)
         if not resolved_project_id:
             if create_project_flag and projeto_nome:
-                proj_resp_id = await resolve_responsavel_id(client, projeto_responsavel, default_user_id=user_id)
                 proj_prazo = (projeto_prazo or "").strip()
                 if not proj_prazo:
                     proj_prazo = (latest_task_date or (today_date + timedelta(days=30))).isoformat()
                 proj = await create_project_api(client, {
-                    "nome": projeto_nome, "responsavel_id": proj_resp_id,
+                    "nome": projeto_nome, 
+                    "responsavel_id": proj_resp_id_unificado,
                     "situacao": (projeto_situacao or "Em planejamento").strip(),
                     "prazo": proj_prazo, "descricao": projeto_descricao, "categoria": projeto_categoria
                 })
@@ -665,18 +666,19 @@ async def tasks_from_xlsx_logic(
             else:
                 raise HTTPException(status_code=404, detail={"erro": f"Projeto '{projeto_nome}' não encontrado. Para criar, envie 'create_project_flag=1'."})
         created, errors = [], []
-        for item in preview:
-            resp_id = await resolve_responsavel_id(client, item.get("responsavel"), default_user_id=user_id)
+        for item in preview:            
             try:
                 created.append(await create_task_api(client, {
                     "nome": item["titulo"], "descricao": item["descricao"],
-                    "projeto_id": resolved_project_id, "responsavel_id": resp_id,
+                    "projeto_id": resolved_project_id, 
+                    "responsavel_id": proj_resp_id_unificado, # <-- MUDANÇA 4: Usar ID unificado
                     "prazo": item["prazo"],
                     "documento_referencia": item["doc_ref"],
                     "status": "não iniciada", "prioridade": "média"
                 }))
             except Exception as e:
                 errors.append({"erro": str(e), "titulo": item["titulo"]})
+                
     return {"mode": "assigned", "projeto_id": resolved_project_id, "criados": created, "total": len(created), "erros": errors}
 
 # =========================
