@@ -1189,24 +1189,49 @@ async def handle_file_chat_from_context(req: ChatRequest, context_doc: Dict[str,
     email_usuario_fmt = req.email_usuario or "email.desconcido"
     id_usuario_fmt = req.id_usuario or "id.desconhecido"
 
+    final_answer = ""
+    tool_steps = []
+
     try:
-        pdf_tools_list = [
+        pdf_enigma_tool_list = [
             FunctionDeclaration(
                 name="solve_pdf_enigma",
                 description="""CHAMADA OBRIGATÓRIA. Use esta ferramenta se a pergunta do usuário contiver QUALQUER palavra relacionada a: 'enigma', 'frase secreta', 'código secreto', 'mensagem escondida', 'frase escondida', 'código', 'decifrar', 'encontrar a frase'. Não use RAG se essas palavras estiverem presentes.""",
                 parameters={"type": "object", "properties": {}}
             )
         ]
-        pdf_tool = Tool(function_declarations=pdf_tools_list)
+        pdf_tool = Tool(function_declarations=pdf_enigma_tool_list)
+
+        xlsx_import_tool_list = [
+            FunctionDeclaration(
+                name="import_project_from_context",
+                description="""CHAMADA OBRIGATÓRIA. Use esta ferramenta se a pergunta do usuário contiver intenção de 'importar', 'criar projeto', 'subir tarefas', 'adicionar da planilha' e o contexto for um arquivo XLSX/CSV. Você DEVE extrair todos os parâmetros solicitados.""",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "projeto_nome": {"type": "string", "description": "O nome do novo projeto."},
+                        "projeto_situacao": {"type": "string", "description": "A situação do projeto (ex: Em planejamento, Em andamento)."},
+                        "projeto_prazo": {"type": "string", "description": "O prazo final do projeto, no formato DD-MM-AAAA."},
+                        "projeto_responsavel": {"type": "string", "description": "O nome ou email do responsável pelo projeto."},
+                        "projeto_descricao": {"type": "string", "description": "Uma breve descrição do projeto (opcional)."},
+                        "projeto_categoria": {"type": "string", "description": "A categoria do projeto (opcional)."},
+                    },
+                    "required": ["projeto_nome", "projeto_situacao", "projeto_prazo", "projeto_responsavel"]
+                }
+            )
+        ]
+        xlsx_tool = Tool(function_declarations=xlsx_import_tool_list)
 
         tools_to_use = []
         file_format_desc = "PDF"
+        rag_text = ""
         
         if context_type == "pdf" or context_type == "pdf_from_xlsx":
             tools_to_use.append(pdf_tool)
             rag_text = clean_pdf_text(raw_file_text)
             file_format_desc = "PDF"
         elif context_type == "xlsx":
+            tools_to_use.append(xlsx_tool)
             rag_text = raw_file_text
             file_format_desc = "CSV (de um XLSX)"
         else:
@@ -1233,21 +1258,24 @@ async def handle_file_chat_from_context(req: ChatRequest, context_doc: Dict[str,
 
         resp = model.generate_content(contents, tools=tools_to_use)
 
-        if (
-            resp.candidates and resp.candidates[0].content and
-            resp.candidates[0].content.parts and
-            getattr(resp.candidates[0].content.parts[0], "function_call", None)
-        ):
-            call = resp.candidates[0].content.parts[0].function_call
-            if call.name == "solve_pdf_enigma":
-                print(f"[Context-Chat] Usuário {id_usuario_fmt} pediu enigma do contexto.")
-                secret_message_raw = extract_hidden_message(raw_pdf_text) # Usa o texto salvo
+        function_call = None
 
-                if not secret_message_raw:
+        if (resp.candidates and
+            resp.candidates[0].content and
+            resp.candidates[0].content.parts):
+            function_call = getattr(resp.candidates[0].content.parts[0], "function_call", None)
+        
+        if function_call and function_call.name == "solve_pdf_enigma":
+            print(f"[Context-Chat] Usuário {id_usuario_fmt} pediu enigma do contexto.")
+            tool_steps.append({"call": {"name": "solve_pdf_enigma", "args": {}}, "result": None})
+            try:
+                raw_result = extract_hidden_message(raw_file_text)
+                if not raw_result:
+                    result = "Nenhuma mensagem secreta encontrada."
                     final_answer = "Analisei o arquivo, mas não encontrei nenhuma frase secreta."
                 else:
                     cleanup_prompt = f"""
-                    Minha função Python extraiu a seguinte frase secreta literal: "{secret_message_raw}"
+                    Minha função Python extraiu a seguinte frase secreta literal: "{raw_result}"
                     
                     Sua tarefa é formatar esta frase para que ela se torne legível em português, seguindo regras MUITO ESTRITAS:
                     
@@ -1258,7 +1286,7 @@ async def handle_file_chat_from_context(req: ChatRequest, context_doc: Dict[str,
                     4.  **Caixa Alta:** A saída final deve ser TODA EM MAIÚSCULAS.
                     5.  **Palavras Estrangeiras:** PODE HAVER palavras estrangeiras (ex: 'TEAM', 'PROJECT', INNOVATION, etc.), mas mantenha a acentuação e caixa alta conforme as regras acima; se atente ao contexto para descobrir se é uma palavra estrangeira ou brasileira.
                     
-                    Frase Bruta: "{secret_message_raw}"
+                    Frase Bruta: "{raw_result}"
                     Transforme isso em uma frase limpa, em português, toda em maiúsculas, sem pontuação.
                     
                     Exemplo de 'antes' e 'depois':
@@ -1271,50 +1299,89 @@ async def handle_file_chat_from_context(req: ChatRequest, context_doc: Dict[str,
                     print("[DEBUG-V16-Context] Chamando IA (Gemini) para limpeza ESTRITA...")
                     cleanup_contents = [Content(role="user", parts=[Part.from_text(cleanup_prompt)])]
                     cleanup_resp = model.generate_content(cleanup_contents, tools=[])
-                    
-                    final_answer_cleaned = ""
+                    cleaned_result = ""
+
                     if cleanup_resp.candidates and cleanup_resp.candidates[0].content and cleanup_resp.candidates[0].content.parts:
-                        final_answer_cleaned = getattr(cleanup_resp.candidates[0].content.parts[0], "text", "").strip()
+                        cleaned_result = getattr(cleanup_resp.candidates[0].content.parts[0], "text", "").strip()
 
-                    if not final_answer_cleaned:
-                        print("[DEBUG-V15-Context] IA de limpeza falhou. Retornando frase bruta.")
-                        final_answer = f"A frase secreta encontrada no arquivo é: {secret_message_raw}"
+                    if not cleaned_result or cleaned_result == raw_result:
+                        result = raw_result
+                        final_answer = f"A frase secreta encontrada no arquivo é: {raw_result}. Não consegui formatá-la melhor."
                     else:
-                        print(f"[DEBUG-V15-Context] IA de limpeza retornou: {final_answer_cleaned}")
-                        final_answer = f"A frase secreta encontrada no arquivo é: {final_answer_cleaned}"
+                        result = cleaned_result
+                        final_answer = f"A frase secreta encontrada no arquivo é: {cleaned_result}"
+                tool_steps[-1]["result"] = result
 
-                final_answer = _normalize_answer(final_answer, nome_usuario_fmt)
-                response_data = {
-                    "tipo_resposta": "TEXTO_PDF",
-                    "conteudo_texto": final_answer,
-                    "dados": [{"call": {"name": "solve_pdf_enigma_context"}, "result": {"status": "OK", "raw": secret_message_raw}}]
-                }
-                return JSONResponse(response_data)
+            except Exception as e:
+                detail = f"Erro ao processar enigma do contexto: {str(e)}"
+                print(f"[Context-Chat] {detail}")
+                final_answer = detail
+                tool_steps[-1]["result"] = {"error": detail}
 
-        print(f"[Context-Chat] Usuário {id_usuario_fmt} pediu RAG do contexto.")
-        final_text = ""
-        if resp.candidates and resp.candidates[0].content and resp.candidates[0].content.parts:
-            final_text = getattr(resp.candidates[0].content.parts[0], "text", "") or ""
-        if not rag_text:
-             final_text = f"Desculpe, não consegui ler o texto do arquivo '{context_filename}' que está na memória."
-        elif not final_text:
-             final_text = "Desculpe, não consegui processar sua solicitação sobre o PDF."
-        final_answer = _normalize_answer(final_text, nome_usuario_fmt)
-        response_data = {
-            "tipo_resposta": "TEXTO_PDF",
-            "conteudo_texto": final_answer,
-            "dados": [{"call": {"name": "RAG_context"}, "result": {"status": "OK", "answer": final_answer}}]
-        }
-        return JSONResponse(response_data)
+        elif function_call and function_call.name == "import_project_from_context":
+            print(f"[Context-V19] Intenção: IMPORTAR (do contexto). UserID: {id_usuario_fmt}")
+            tool_steps.append({"call": "import_project_from_context", "args": function_call.args, "result": None})
+            
+            try:
+                params = function_call.args
+                # 1. Obter os *bytes* do XLSX salvos no contexto
+                xlsx_bytes_from_context = context_doc.get("binary_content")
+                if not xlsx_bytes_from_context:
+                    raise HTTPException(status_code=500, detail="Contexto XLSX encontrado, mas os dados binários (para importação) estão faltando. Por favor, anexe o arquivo novamente.")
+                
+                # 2. Validar prazo (copiado do /ai/chat-with-xlsx)
+                prazo_fmt = _parse_date_robust(params.get("projeto_prazo"))
+
+                # 3. Chamar a lógica de importação principal
+                result = await tasks_from_xlsx_logic(
+                    projeto_id=None,
+                    projeto_nome=params.get("projeto_nome"),
+                    user_id=id_usuario_fmt,
+                    create_project_flag=1,
+                    projeto_situacao=params.get("projeto_situacao"),
+                    projeto_prazo=prazo_fmt,
+                    projeto_responsavel=params.get("projeto_responsavel"),
+                    projeto_descricao=params.get("projeto_descricao"),
+                    projeto_categoria=params.get("projeto_categoria"),
+                    xlsx_url=None,
+                    file_bytes=xlsx_bytes_from_context
+                )
+                
+                total = result.get('total', 0)
+                erros = len(result.get('erros', []))
+                final_answer = f"Projeto '{params.get('projeto_nome')}' criado com sucesso a partir do arquivo '{context_filename}'! Foram importadas {total} tarefas, com {erros} erros."
+                tool_steps[-1]["result"] = result
+
+            except Exception as e:
+                detail = str(e)
+                if isinstance(e, HTTPException): detail = e.detail
+                elif isinstance(e, httpx.HTTPStatusError):
+                    try: detail = e.response.json().get("detail", str(e))
+                    except Exception: detail = e.response.text
+                print(f"[Context-V19] FALHA ao importar do contexto: {detail}")
+                final_answer = f"Tentei importar o projeto a partir do arquivo '{context_filename}', mas falhei: {detail}"
+                tool_steps[-1]["result"] = {"error": detail}
+
+        else:
+            print(f"[Context-V19] Intenção: RAG (do contexto). UserID: {id_usuario_fmt}")
+            if resp.candidates and resp.candidates[0].content and resp.candidates[0].content.parts:
+                final_answer = getattr(resp.candidates[0].content.parts[0], "text", "Não encontrei a resposta no documento.")
+            else:
+                final_answer = "Não encontrei a resposta no documento."
+            tool_steps.append({"call": "RAG_on_Context", "args": {"pergunta": pergunta}, "result": final_answer})
+
+        final_answer_fmt = _normalize_answer(final_answer, nome_usuario_fmt)
+        return JSONResponse({
+            "tipo_resposta": "TEXTO_CONTEXTO",
+            "conteudo_texto": final_answer_fmt,
+            "dados": tool_steps
+        })
+
     except Exception as e:
-        return JSONResponse(
-            status_code=200, # O frontend espera um 200
-            content={
-                "tipo_resposta": "TEXTO",
-                "conteudo_texto": f"Desculpe, tive um erro ao processar sua pergunta sobre o arquivo: {str(e)}",
-                "dados": [{"error": str(e)}]
-            }
-        )
+        detail = str(e)
+        if isinstance(e, HTTPException): detail = e.detail
+        print(f"[Context-V19] ERRO GERAL em handle_file_chat_from_context: {detail}")
+        raise e
 
 # =========================
 # Rotas FastAPI
@@ -1704,29 +1771,33 @@ async def ai_chat_with_xlsx(
                     tool_steps.append({"call": "import_from_file", "args": params, "result": {"error": detail}})    
         
         elif intention == "rag" and not task_name:
-            print(f"[DEBUG-V18] Intenção: RAG GERAL (sobre o XLSX). Pergunta: {pergunta}")
+            print(f"[DEBUG-V19] Intenção: RAG GERAL (sobre o XLSX). Pergunta: {pergunta}")
             
+            # 1. Converter DF para texto (CSV)
             xlsx_text_content = df.to_csv(index=False)
             if not xlsx_text_content.strip():
                  raise HTTPException(status_code=400, detail="O arquivo XLSX parece estar vazio ou não pude lê-lo.")
 
+            # 2. Salvar no Contexto (para follow-ups)
             try:
                 db = mongo()
                 db[COLL_CONTEXTOS].update_one(
                     {"user_id": id_usuario_fmt},
                     {"$set": {
                         "user_id": id_usuario_fmt,
-                        "context_type": "xlsx", # Novo tipo de contexto
-                        "text_content": xlsx_text_content, # Salva o CSV
+                        "context_type": "xlsx",
+                        "text_content": xlsx_text_content, # (CSV) Para RAG futuro
+                        "binary_content": xlsx_bytes,    # (Bytes) Para IMPORTAÇÃO futura
                         "filename": file.filename,
                         "updated_at": today()
                     }},
                     upsert=True
                 )
-                print(f"[Context] Contexto XLSX GERAL salvo para {id_usuario_fmt} (Arquivo: {file.filename}).")
+                print(f"[Context-V19] Contexto XLSX GERAL (Texto+Binário) salvo para {id_usuario_fmt} (Arquivo: {file.filename}).")
             except Exception as e:
-                print(f"[Context] FALHA ao salvar contexto XLSX GERAL para {id_usuario_fmt}: {e}")
+                print(f"[Context-V19] FALHA ao salvar contexto XLSX GERAL para {id_usuario_fmt}: {e}")
 
+            # 3. Preparar RAG Prompt
             rag_prompt = f"""
             Use o CONTEÚDO DO DOCUMENTO XLSX abaixo (formatado como CSV) para responder a PERGUNTA DO USUÁRIO.
             Responda APENAS com base no CONTEÚDO DO DOCUMENTO.
@@ -1738,6 +1809,7 @@ async def ai_chat_with_xlsx(
             PERGUNTA DO USUÁRIO: {pergunta}
             """
             
+            # 4. Chamar Gemini (reutilizando a lógica do RAG de PDF)
             data_hoje, (inicio_mes, fim_mes) = iso_date(today()), month_bounds(today())
             system_prompt_filled = SYSTEM_PROMPT.format(
                 nome_usuario=nome_usuario_fmt, 
