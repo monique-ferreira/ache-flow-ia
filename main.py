@@ -1122,16 +1122,16 @@ async def ai_chat_with_pdf(
         Use o CONTEÚDO DO DOCUMENTO abaixo para responder a PERGUNTA DO USUÁRIO.
 
         ==================== REGRAS ESPECIAIS PARA ENIGMAS ====================
-        SE, E SOMENTE SE, a pergunta do usuário for sobre 'enigma', 'frase secreta', 'código' ou 'mensagem escondida',
+        SE, E SOMENTE SE, a pergunta do usuário for sobre 'enigma', 'frase secreta', 'código', 'mensagem escondida', 'código secreto', 'frase escondida', ou termos similares,
         siga ESTAS regras para analisar o CONTEÚDO DO DOCUMENTO:
 
         1.  O CONTEÚDO DO DOCUMENTO é um texto bruto que preserva letras maiúsculas "fora de lugar" (ex: 'contribUI' ou 'custO').
         2.  Analise o texto palavra por palavra.
         3.  Encontre TODAS as palavras que contêm letras maiúsculas "fora do padrão" (ex: 'EQuilibra', 'contribUI', 'custO').
         4.  IGNORE palavras que são siglas (100% maiúsculas, como 'ISO' ou 'SUS').
-        5.  IGNORE palavras que são inícios normais de frase (ex: "Para", "A coordenação", "No controle", "Texto.1").
-        6.  Extraia APENAS as letras maiúsculas das palavras que você encontrou (ex: 'contribUI' -> 'UI', 'custO' -> 'O').
-        7.  Junte todas as letras maiúsculas em ordem para formar uma frase.
+        5.  IGNORE palavras que são inícios normais de frase (ex: "Para", "A coordenação", "No controle", "Texto.1") caso antecedam símbolos que indiquem final de frase, como ".", "!", "?".
+        6.  Extraia APENAS as letras maiúsculas das palavras que você encontrou (ex: 'contribUI' -> 'UI', 'custO' -> 'O'). Cada conjunto de letras de uma única palavra é um "bloco".
+        7.  Junte todos os "blocos" em ordem, separados por um espaço, para formar a frase (ex: 'UI' + 'O' -> 'UI O').
         8.  Responda ao usuário com: "A frase secreta encontrada no arquivo é: [FRASE MONTADA]"
 
         ==================== OUTRAS PERGUNTAS (RAG) ====================
@@ -1175,7 +1175,12 @@ async def ai_chat_with_pdf(
         response_data = {
             "tipo_resposta": "TEXTO_PDF",
             "conteudo_texto": final_answer,
-            "dados": [{"tool_used": "RAG_com_Enigma_Prompt"}] # Log
+            "dados": [
+                {
+                    "call": {"name": "RAG_com_Enigma_Prompt", "args": {"pergunta": pergunta}},
+                    "result": {"status": "OK", "answer": final_answer}
+                }
+            ]
         }
         return JSONResponse(response_data)
 
