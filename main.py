@@ -266,6 +266,7 @@ def _try_download_traced(url: str, timeout: int, user_agent: str):
     with requests.get(url, timeout=timeout, allow_redirects=True, headers=headers, stream=False) as r:
         status, ctype, final_url, content = r.status_code, (r.headers.get("Content-Type") or "").lower(), r.url, r.content or b""
         return {"status": status, "content_type": ctype, "final_url": final_url, "content": content, "is_pdf_signature": content[:4] == b"%PDF", "size": len(content)}
+
 def normalize_sharepoint_pdf_url(u: str) -> str:
     try:
         pu = urlparse(u)
@@ -278,21 +279,57 @@ def normalize_sharepoint_pdf_url(u: str) -> str:
                 return f"{pu.scheme}://{pu.netloc}{encoded_path}"
     except Exception: pass
     return u
+
+def normalize_gdrive_pdf_url(u: str) -> str:
+    """Converte links de visualização do Google Drive em links de download direto."""
+    try:
+        m = re.search(r"/file/d/([a-zA-Z0-9_-]{28,})", u)
+        if m:
+            file_id = m.group(1)
+            return f"https://drive.google.com/uc?export=download&id={file_id}"
+        m_open = re.search(r"id=([a-zA-Z0-9_-]{28,})", u)
+        if m_open and "drive.google.com" in u:
+            file_id = m_open.group(1)
+            return f"https://drive.google.com/uc?export=download&id={file_id}"
+    except Exception:
+        pass
+    return u
+
 def fetch_pdf_bytes(url: str):
     if not url: raise ValueError("URL ausente para PDF")
     u = url.strip()
     if not u.lower().startswith(("http://", "https://")): raise ValueError("URL inválida para PDF")
-    u_norm = normalize_sharepoint_pdf_url(u)
-    def _is_pdf(ctype: str, content: bytes) -> bool: return ("pdf" in ctype) or (content[:4] == b"%PDF")
-    variants = [("direct", u_norm)]
-    if "download=1" not in u_norm.lower():
-        sep = "&" if "?" in u_norm else "?"; variants.append(("download=1", u_norm + f"{sep}download=1"))
+    u_norm = u
+    if "sharepoint.com" in u:
+        u_norm = normalize_sharepoint_pdf_url(u)
+    elif "drive.google.com" in u:
+        u_norm = normalize_gdrive_pdf_url(u)
+    def _is_pdf(ctype: str, content: bytes) -> bool: 
+        return ("pdf" in ctype.lower()) or ("octet-stream" in ctype.lower()) or (content[:4] == b"%PDF")
+    variants = [("normalized", u_norm)]
+    if u_norm != u:
+        variants.append(("original", u))
     if "sharepoint.com" in u_norm.lower():
+        if "download=1" not in u_norm.lower():
+            sep = "&" if "?" in u_norm else "?"; variants.append(("download=1", u_norm + f"{sep}download=1"))
         pu = urlparse(u_norm); base = f"{pu.scheme}://{pu.netloc}"; src = quote(u_norm, safe=""); variants.append(("download.aspx", f"{base}/_layouts/15/download.aspx?SourceUrl={src}"))
     last = None
     for label, cand in variants:
+        print(f"[DEBUG-Fetch] Tentando baixar (método: {label}): {cand[:100]}...")
         r = _try_download_traced(cand, TIMEOUT_S, PDF_USER_AGENT); last = r
-        if r["status"] == 200 and _is_pdf(r["content_type"], r["content"]): return r["content"]
+        if "drive.google.com" in cand and "text/html" in r["content_type"].lower():
+            try:
+                print("[DEBUG-Fetch] GDrive retornou HTML. Verificando se é página de confirmação...")
+                m_confirm = re.search(r'href="(/uc\?export=download&amp;confirm=[a-zA-Z0-9_&;-]+)"', r["content"].decode('utf-8', errors='ignore'))
+                if m_confirm:
+                    confirm_url = "https://drive.google.com" + m_confirm.group(1).replace("&amp;", "&")
+                    print(f"[DEBUG-Fetch] GDrive precisa de confirmação. Tentando: {confirm_url[:100]}...")
+                    r = _try_download_traced(confirm_url, TIMEOUT_S, PDF_USER_AGENT); last = r
+            except Exception as e_parse:
+                print(f"[DEBUG-Fetch] Falha ao parsear página de confirmação do GDrive: {e_parse}")
+        if r["status"] == 200 and _is_pdf(r["content_type"], r["content"]): 
+            print("[DEBUG-Fetch] Download concluído.")
+            return r["content"]
     raise ValueError(f"Não foi possível obter PDF (último status={last['status'] if last else None}, content-type={last['content_type'] if last else None}).")
 
 def clean_pdf_text(s: str) -> str:
@@ -308,13 +345,16 @@ def _anchor_regex_flex(label: str) -> re.Pattern:
     if not m: return re.compile(r"(?!)")
     num = m.group(1); return re.compile(rf"(?i)\bTexto\.?{re.escape(num)}\.?\b[:\-]?\s*")
 
-def extract_after_anchor_from_pdf(pdf_bytes: bytes, anchor_label: str, max_chars: int = 4000) -> str:
-    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf: text_all = "\n".join((page.extract_text() or "") for page in pdf.pages)
+def extract_after_anchor_from_pdf(text_all: str, anchor_label: str, max_chars: int = 4000) -> str:
     if not text_all.strip(): return ""
+    
     rx = _anchor_regex_flex(anchor_label); m = rx.search(text_all)
     if not m: return ""
-    start = m.end(); next_m = re.search(r"(?i)\bTexto\.?\d+\.?\b", text_all[start:])
+    
+    start = m.end()
+    next_m = re.search(r"(?i)\bTexto\.?\d+\.?\b", text_all[start:])
     end = start + next_m.start() if next_m else len(text_all)
+    
     return text_all[start:end].strip()[:max_chars].strip()
 
 def xlsx_bytes_to_dataframe_preserving_hyperlinks(xlsx_bytes: bytes) -> pd.DataFrame:
@@ -349,46 +389,35 @@ def xlsx_bytes_to_dataframe_preserving_hyperlinks(xlsx_bytes: bytes) -> pd.DataF
 def extract_full_pdf_text(pdf_bytes: bytes) -> str:
     text_all = ""
     print("[DEBUG] Iniciando extract_full_pdf_text V13 (Super-Debug)...")
-    
     try:
         print("[DEBUG] Tentando extração com PDFPLUMBER...")
-        
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             text_all = "\n".join((page.extract_text(x_tolerance=3, y_tolerance=3) or "") for page in pdf.pages if page.extract_text())
-        
         if text_all.strip(): 
             print("[DEBUG] PDFPLUMBER SUCESSO. Retornando texto.")
             print(f"[DEBUG] Amostra PDFPLUMBER: {text_all.strip()[:200]}")
             return text_all
-        
         print("[DEBUG] PDFPLUMBER não retornou texto. Fallback para PyMuPDF/fitz.")
-        
     except Exception as e:
         print(f"[DEBUG] PDFPLUMBER FALHOU com erro: {e}. Fallback para PyMuPDF/fitz.")
-    
     try:
         print("[DEBUG] Tentando extração com FITZ (PyMuPDF)...")
         text_all_fitz = ""
         with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
             for page in doc:
                 text_all_fitz += page.get_text("text") or ""
-        
         if text_all_fitz.strip():
             print("[DEBUG] FITZ SUCESSO. Retornando texto.")
             print(f"[DEBUG] Amostra FITZ: {text_all_fitz.strip()[:200]}") 
             return text_all_fitz
         else:
             print("[DEBUG] FITZ não retornou texto. Retornando vazio.")
-            return ""
-            
+            return ""  
     except Exception as e_fitz:
          print(f"[DEBUG] FITZ FALHOU com erro: {e_fitz}")
          return ""
-
-# ESTA É A FUNÇÃO PYTHON QUE A V14 VAI USAR
+    
 def extract_hidden_message(raw_text: str) -> str:
-    # Esta função é chamada pela lógica V14 (híbrida)
-    # quando a IA detecta a intenção de "enigma".
     if not raw_text: return ""
     secret_parts = []
     text = re.sub(r"([a-zA-Z])\s*\n\s*([a-zA-Z])", r"\1\2", raw_text)
@@ -415,7 +444,6 @@ def extract_hidden_message(raw_text: str) -> str:
     
 # =========================
 # Auth (Falar com API Render)
-# (Omitido por brevidade)
 # =========================
 _token_cache: Dict[str, Any] = {"access_token": None, "expires_at": 0, "user_id": None}
 async def get_auth_header(client: httpx.AsyncClient) -> Dict[str, str]:
@@ -450,7 +478,6 @@ async def get_api_auth_headers(client: httpx.AsyncClient, use_json: bool = True)
 
 # =========================
 # Lógica de Importação (do ai_api.py)
-# (Omitido por brevidade)
 # =========================
 class CreateTaskItem(BaseModel):
     titulo: str; descricao: Optional[str] = None; responsavel: Optional[str] = None
@@ -525,16 +552,23 @@ def duration_to_date(duracao: Optional[str]) -> str:
         n = int(m.group(1)) if m else 7
     except Exception: n = 7
     return (base + timedelta(days=n)).isoformat()
+
 def resolve_descricao_pdf(row) -> str:
     como, docrf = str(row.get("Como Fazer") or "").strip(), str(row.get("Documento Referência") or "").strip()
-    if not como or not docrf or not re.search(r"(?i)\b((?:Doc\.?\s*)?(Texto\.?\d+))\b\.?", como): return como
+    if not como or not docrf or not re.search(r"(?i)\b((?:Doc\.?\s*)?(Texto\.?\d+))\b\.?", como): 
+        return como
     try: 
         pdf_bytes = fetch_pdf_bytes(docrf)
-    except Exception: 
+        full_pdf_text = extract_full_pdf_text(pdf_bytes)
+        if not full_pdf_text.strip():
+            print(f"[DEBUG] PDF {docrf} não retornou texto. Usando '{como}' como fallback.")
+            return como
+    except Exception as e:
+        print(f"[DEBUG] Falha ao baixar/processar PDF {docrf}: {e}. Usando '{como}' como fallback.")
         return como
     def _repl(m: re.Match) -> str:
         full_token, anchor = m.group(1), m.group(2)
-        extracted = clean_pdf_text(extract_after_anchor_from_pdf(pdf_bytes, anchor))
+        extracted = clean_pdf_text(extract_after_anchor_from_pdf(full_pdf_text, anchor))
         return extracted if extracted else full_token
     return re.sub(r"(?i)\b((?:Doc\.?\s*)?(Texto\.?\d+))\b\.?", _repl, como)
 
@@ -589,8 +623,10 @@ async def tasks_from_xlsx_logic(
         if latest_task_date is None or task_date_obj > latest_task_date:
             latest_task_date = task_date_obj
         preview.append({
-            "titulo": str(row["Nome"]), "descricao": str(row.get("descricao_final") or ""),
-            "responsavel": str(row.get("Responsavel") or ""), "doc_ref": str(row.get("Documento Referência") or "").strip(),
+            "titulo": str(row["Nome"]),
+            "descricao": str(row.get("descricao_final") or ""),
+            "responsavel": str(row.get("Responsavel") or ""),
+            "doc_ref": str(row.get("Documento Referência") or "").strip(),
             "prazo": prazo_col,
         })
     if not projeto_id and not projeto_nome:
