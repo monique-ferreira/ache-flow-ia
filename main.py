@@ -235,6 +235,52 @@ def _enrich_doc_with_responsavel(doc: Dict[str, Any], employee_map: Dict[str, st
         
     return doc
 
+async def _clean_enigma_string(raw_message: str, model: GenerativeModel) -> str:
+    """
+    Usa uma chamada de IA para formatar a string bruta do enigma (ex: "EQ UI PE")
+    em uma string legível (ex: "EQUIPE VOCES").
+    """
+    if not raw_message:
+        return ""
+        
+    cleanup_prompt = f"""
+    Minha função Python extraiu a seguinte frase secreta literal: "{raw_message}"
+    
+    Sua tarefa é formatar esta frase para que ela se torne legível em português, seguindo regras MUITO ESTRITAS:
+    
+    1.  **Ordem e Letras:** A ordem das letras e as próprias letras NÃO PODEM MUDAR.
+        (Exemplo: O bloco 'EQ UI PE' deve se tornar 'EQUIPE'. O 'Q' não pode ser inventado. O 'E' inicial não pode virar 'É'.)
+    2.  **Acentuação:** Adicione a acentuação correta onde necessário. (Ex: 'VOCES' -> 'VOCÊS', 'SAO' -> 'SÃO').
+    3.  **Sem Pontuação:** NÃO adicione NENHUMA pontuação (vírgulas, pontos de exclamação, etc.). A saída deve ser "texto liso".
+    4.  **Caixa Alta:** A saída final deve ser TODA EM MAIÚSCULAS.
+    5.  **Palavras Estrangeiras:** PODE HAVER palavras estrangeiras (ex: 'TEAM', 'PROJECT', INNOVATION, etc.), mas mantenha a acentuação e caixa alta conforme as regras acima; se atente ao contexto para descobrir se é uma palavra estrangeira ou brasileira.
+    
+    Frase Bruta: "{raw_message}"
+    Transforme isso em uma frase limpa, em português, toda em maiúsculas, sem pontuação.
+    
+    Exemplo de 'antes' e 'depois':
+    - Antes: "EQ UI PE VO C E S PA SS AR AM"
+    - Depois: "EQUIPE VOCÊS PASSARAM"
+    
+    Responda APENAS com a frase final limpa.
+    """
+    
+    print("[DEBUG-CLEANUP] Chamando IA (Gemini) para limpeza ESTRITA...")
+    
+    cleanup_contents = [Content(role="user", parts=[Part.from_text(cleanup_prompt)])]
+    cleanup_resp = model.generate_content(cleanup_contents, tools=[])
+                    
+    final_answer_cleaned = ""
+    if cleanup_resp.candidates and cleanup_resp.candidates[0].content and cleanup_resp.candidates[0].content.parts:
+        final_answer_cleaned = getattr(cleanup_resp.candidates[0].content.parts[0], "text", "").strip()
+
+    if not final_answer_cleaned:
+        print("[DEBUG-CLEANUP] IA de limpeza falhou. Retornando frase bruta.")
+        return raw_message
+    else:
+        print(f"[DEBUG-CLEANUP] IA de limpeza retornou: {final_answer_cleaned}")
+        return final_answer_cleaned
+
 # =========================
 # Helpers de Download (PDF/XLSX)
 # =========================
@@ -1729,19 +1775,24 @@ async def ai_chat_with_xlsx(
                 )
                 print(f"[Context] Contexto XLSX-PDF salvo para {id_usuario_fmt} (Tarefa: {task_name}).")
             except Exception as e:
-                # Não pare a execução, apenas avise
                 print(f"[Context] FALHA ao salvar contexto XLSX-PDF para {id_usuario_fmt}: {e}")
             
             
             if intention == "enigma":
                 print(f"[DEBUG-V17] Processando Enigma a partir de texto baixado...")
-                result = extract_hidden_message(pdf_content_raw)
-                if not result:
-                    result = "Nenhuma mensagem secreta encontrada."
                 
-                final_answer = f"A resposta para o enigma no PDF da tarefa '{task_name}' é: {result}"
+                raw_result = extract_hidden_message(pdf_content_raw)
+                
+                if not raw_result:
+                    result = "Nenhuma mensagem secreta encontrada."
+                    final_answer = "Analisei o arquivo, mas não encontrei nenhuma frase secreta."
+                else:
+                    cleaned_result = await _clean_enigma_string(raw_result, model)
+                    result = cleaned_result
+                    final_answer = f"A frase secreta encontrada no PDF da tarefa '{task_name}' é: {cleaned_result}"
+
                 tool_steps.append({"call": "solve_pdf_enigma_from_text", "args": {"task": task_name}, "result": result})
-            
+
             else:
                 print(f"[DEBUG-V17] Processando RAG a partir de texto baixado...")
                                 
