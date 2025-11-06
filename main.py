@@ -1,7 +1,7 @@
-# main.py (V14 - Lógica Híbrida Definitiva)
+# main.py (V16 - Lógica Híbrida + Roteador XLSX)
 # IA (Ferramenta) detecta intenção.
 # Python (extract_hidden_message) executa a lógica.
-import os, io, re, time, asyncio
+import os, io, re, time, asyncio, json
 from typing import List, Optional, Dict, Any, Tuple
 from urllib.parse import urlparse, parse_qs, unquote, quote, urljoin
 from datetime import datetime, timedelta, date
@@ -1285,6 +1285,133 @@ async def ai_chat_with_pdf(
             ]
         }
         return JSONResponse(response_data)
+
+    except Exception as e:
+        raise e
+
+@app.post("/ai/chat-with-xlsx")
+async def ai_chat_with_xlsx(
+    pergunta: str = Form(...),
+    file: UploadFile = File(...), # TODO: Adicionar suporte a xlsx_url/google_sheet_url se necessário
+    nome_usuario: Optional[str] = Form(None),
+    email_usuario: Optional[str] = Form(None),
+    id_usuario: Optional[str] = Form(None),
+    _ = Depends(require_api_key)
+):
+    """
+    Endpoint de chat (V16 - Lógica Híbrida com XLSX)
+    
+    1. Recebe um XLSX e uma pergunta.
+    2. Identifica a qual TAREFA a pergunta se refere.
+    3. Busca o hiperlink do PDF para aquela tarefa.
+    4. Executa a lógica de RAG ou Enigma naquele PDF.
+    """
+    try:
+        xlsx_bytes = await file.read()
+        
+        df = xlsx_bytes_to_dataframe_preserving_hyperlinks(xlsx_bytes)
+        
+        if "Nome" not in df.columns or "Documento Referência" not in df.columns:
+            raise HTTPException(status_code=400, detail="O XLSX precisa das colunas 'Nome' e 'Documento Referência'.")
+        
+        task_names = df["Nome"].dropna().unique().tolist()
+        task_map_str = "\n".join(f"- {name}" for name in task_names)
+
+        model = init_model("Você é um assistente de roteamento.")
+        
+        prompt_identificacao = f"""
+        O usuário fez a pergunta: "{pergunta}"
+        
+        O XLSX contém estas tarefas:
+        {task_map_str}
+        
+        Analise a pergunta e me retorne um JSON com:
+        1. "task_name": O nome exato da tarefa da lista que o usuário mencionou (ou null se não for claro).
+        2. "intention": "enigma" (se a pergunta for sobre enigma, frase secreta, etc.) ou "rag" (para qualquer outra pergunta, como resumir ou buscar).
+        
+        Responda APENAS com o JSON.
+        """
+        
+        resp = model.generate_content([prompt_identificacao], tools=[])
+        response_text = "{}".strip()
+        if resp.candidates and resp.candidates[0].content and resp.candidates[0].content.parts:
+            response_text = getattr(resp.candidates[0].content.parts[0], "text", "{}").replace("`", "").replace("json", "").strip()
+        
+        try:
+            route_info = json.loads(response_text)
+            task_name = route_info.get("task_name")
+            intention = route_info.get("intention", "rag")
+        except Exception:
+            raise HTTPException(status_code=400, detail="Não consegui entender a qual tarefa você se refere.")
+
+        if not task_name or task_name not in task_names:
+            raise HTTPException(status_code=404, detail=f"Não consegui identificar uma tarefa válida da sua planilha na sua pergunta.")
+
+        task_row = df[df['Nome'] == task_name].iloc[0]
+        pdf_url = task_row.get("Documento Referência")
+        
+        if not pdf_url or not str(pdf_url).lower().startswith("http"):
+             raise HTTPException(status_code=404, detail=f"A tarefa '{task_name}' não possui um link de PDF válido no arquivo.")
+
+        final_answer = ""
+        tool_steps = []
+        nome_usuario_fmt = nome_usuario or "você"
+
+        if intention == "enigma":
+            print(f"[DEBUG-V16] Intenção: ENIGMA. PDF: {pdf_url}")
+            
+            result = await solve_pdf_enigma_from_url_impl(pdf_url)
+            final_answer = f"A resposta para o enigma no PDF da tarefa '{task_name}' é: {result}"
+            tool_steps.append({"call": "solve_pdf_enigma_from_url", "args": {"url": pdf_url}, "result": result})
+
+        else:
+            print(f"[DEBUG-V16] Intenção: RAG. PDF: {pdf_url}")
+            
+            pdf_content_raw = await get_pdf_content_from_url_impl(pdf_url)
+            
+            if "Erro ao processar PDF" in pdf_content_raw:
+                 raise HTTPException(status_code=500, detail=f"Erro ao ler o PDF da tarefa '{task_name}': {pdf_content_raw}")
+
+            pdf_content = clean_pdf_text(pdf_content_raw)
+            
+            if not pdf_content:
+                raise HTTPException(status_code=500, detail=f"Consegui baixar o PDF da tarefa '{task_name}', mas não extraí texto dele.")
+
+            rag_prompt = f"""
+            Use o CONTEÚDO DO DOCUMENTO abaixo (referente à tarefa '{task_name}') para responder a PERGUNTA DO USUÁRIO.
+            
+            ==================== CONTEÚDO DO DOCUMENTO ====================
+            {pdf_content[:10000]}
+            ===============================================================
+
+            PERGUNTA DO USUÁRIO: {pergunta}
+            """
+            
+            data_hoje, (inicio_mes, fim_mes) = iso_date(today()), month_bounds(today())
+            
+            system_prompt_filled = SYSTEM_PROMPT.format(
+                nome_usuario=nome_usuario_fmt, 
+                email_usuario=(email_usuario or "email.desconhecido"), 
+                id_usuario=(id_usuario or "id.desconhecido"),
+                data_hoje=data_hoje, inicio_mes=inicio_mes, fim_mes=fim_mes,
+            )
+            rag_model = init_model(system_prompt_filled)
+            rag_resp = rag_model.generate_content([rag_prompt], tools=[])
+            
+            if rag_resp.candidates and rag_resp.candidates[0].content and rag_resp.candidates[0].content.parts:
+                final_answer = getattr(rag_resp.candidates[0].content.parts[0], "text", "Não encontrei a resposta no documento.")
+            else:
+                 final_answer = "Não encontrei a resposta no documento."
+
+            tool_steps.append({"call": "RAG_on_XLSX_PDF", "args": {"url": pdf_url, "pergunta": pergunta}, "result": final_answer})
+
+        final_answer_fmt = _normalize_answer(final_answer, nome_usuario_fmt)
+        
+        return JSONResponse({
+            "tipo_resposta": "TEXTO_XLSX", # Novo tipo
+            "conteudo_texto": final_answer_fmt,
+            "dados": tool_steps
+        })
 
     except Exception as e:
         raise e
