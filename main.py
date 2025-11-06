@@ -1232,18 +1232,15 @@ async def ai_chat_with_pdf(
     """
     try:
         pdf_bytes = await file.read()
-        
         raw_pdf_text = extract_full_pdf_text(pdf_bytes)
-        
         pdf_tools_list = [
             FunctionDeclaration(
                 name="solve_pdf_enigma",
-                description="Resolve o enigma de 'frase secreta' do PDF. Use esta ferramenta se o usuário perguntar sobre 'enigma', 'frase secreta', 'código', 'mensagem escondida', 'código secreto', 'frase escondida', ou termos similares.",
+                description="""CHAMADA OBRIGATÓRIA. Use esta ferramenta se a pergunta do usuário contiver QUALQUER palavra relacionada a: 'enigma', 'frase secreta', 'código secreto', 'mensagem escondida', 'frase escondida', 'código', 'decifrar', 'encontrar a frase'. Não use RAG se essas palavras estiverem presentes.""",
                 parameters={"type": "object", "properties": {}}
             )
         ]
         pdf_tool = Tool(function_declarations=pdf_tools_list)
-
         rag_text = clean_pdf_text(raw_pdf_text) 
         contexto_prompt = f"""
         Você é um assistente. Use o CONTEÚDO DO DOCUMENTO abaixo para responder a PERGUNTA DO USUÁRIO.
@@ -1302,10 +1299,6 @@ async def ai_chat_with_pdf(
 
                 print(f"[DEBUG-V15] Python (V14) encontrou: {secret_message_raw}")
                 
-                # ----------------------------------------------------
-                # NOVO PASSO (V15): LIMPEZA PELA IA
-                # ----------------------------------------------------
-                
                 cleanup_prompt = f"""
                 Minha função Python extraiu a seguinte frase secreta literal: "{secret_message_raw}"
                 
@@ -1316,6 +1309,7 @@ async def ai_chat_with_pdf(
                 2.  **Acentuação:** Adicione a acentuação correta onde necessário. (Ex: 'VOCES' -> 'VOCÊS', 'SAO' -> 'SÃO').
                 3.  **Sem Pontuação:** NÃO adicione NENHUMA pontuação (vírgulas, pontos de exclamação, etc.). A saída deve ser "texto liso".
                 4.  **Caixa Alta:** A saída final deve ser TODA EM MAIÚSCULAS.
+                5.  **Palavras Estrangeiras:** PODE HAVER palavras estrangeiras (ex: 'TEAM', 'PROJECT', INNOVATION, etc.), mas mantenha a acentuação e caixa alta conforme as regras acima; se atente ao contexto para descobrir se é uma palavra estrangeira ou brasileira.
                 
                 Frase Bruta: "{secret_message_raw}"
                 Transforme isso em uma frase limpa, em português, toda em maiúsculas, sem pontuação.
