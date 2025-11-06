@@ -1712,9 +1712,8 @@ async def ai_chat_with_xlsx(
         xlsx_bytes = await file.read()
         df = xlsx_bytes_to_dataframe_preserving_hyperlinks(xlsx_bytes)
         
-        id_usuario_fmt = id_usuario
-        if not id_usuario_fmt:
-            id_usuario_fmt = "id.desconhecido.xlsx"
+        id_usuario_fmt = id_usuario or "id.desconhecido" 
+        if id_usuario and id_usuario == id_usuario_fmt: # Adiciona o sufixo apenas para debug/context, mas o ID real é limpo
             print("[Context] ATENÇÃO: id_usuario não fornecido para /ai/chat-with-xlsx. A memória não funcionará corretamente.")
         
         nome_usuario_fmt = nome_usuario or "você"
@@ -1853,14 +1852,17 @@ async def ai_chat_with_xlsx(
             """
             
             data_hoje, (inicio_mes, fim_mes) = iso_date(today()), month_bounds(today())
-            system_prompt_filled = SYSTEM_PROMPT.format(
-                nome_usuario=nome_usuario_fmt, 
-                email_usuario=email_usuario_fmt, 
-                id_usuario=id_usuario_fmt,
-                data_hoje=data_hoje, 
-                inicio_mes=inicio_mes, 
-                fim_mes=fim_mes,
-            )
+            
+            format_args = {
+                "nome_usuario": nome_usuario_fmt,
+                "email_usuario": email_usuario_fmt,
+                "id_usuario": id_usuario_fmt, 
+                "data_hoje": data_hoje,
+                "inicio_mes": inicio_mes,
+                "fim_mes": fim_mes,
+            }
+            system_prompt_filled = SYSTEM_PROMPT.format(**format_args)
+            
             rag_model = init_model(system_prompt_filled)
             rag_resp = rag_model.generate_content([rag_prompt], tools=[])
             
@@ -1974,12 +1976,17 @@ async def ai_chat_with_xlsx(
                 PERGUNTA DO USUÁRIO: {pergunta}
                 """                
                 data_hoje, (inicio_mes, fim_mes) = iso_date(today()), month_bounds(today()) 
-                system_prompt_filled = SYSTEM_PROMPT.format(
-                    nome_usuario=nome_usuario_fmt, 
-                    email_usuario=email_usuario_fmt, 
-                    id_usuario=id_usuario_fmt,
-                    data_hoje=data_hoje, inicio_mes=inicio_mes, fim_mes=fim_mes,
-                )                
+                
+                format_args = {
+                    "nome_usuario": nome_usuario_fmt,
+                    "email_usuario": email_usuario_fmt,
+                    "id_usuario": id_usuario_fmt,
+                    "data_hoje": data_hoje,
+                    "inicio_mes": inicio_mes,
+                    "fim_mes": fim_mes,
+                }
+                system_prompt_filled = SYSTEM_PROMPT.format(**format_args)
+
                 rag_model = init_model(system_prompt_filled)
                 rag_resp = rag_model.generate_content([rag_prompt], tools=[])                
                 if rag_resp.candidates and rag_resp.candidates[0].content and rag_resp.candidates[0].content.parts:
@@ -1995,7 +2002,7 @@ async def ai_chat_with_xlsx(
         })
     except Exception as e:
         raise e
-            
+                
 @app.post("/pdf/extract-text")
 async def pdf_extract_text(file: UploadFile = File(...), _ = Depends(require_api_key)):
     """
