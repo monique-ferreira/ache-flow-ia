@@ -1,4 +1,6 @@
-# main.py (V10 - Usando Texto Bruto para Enigma)
+# main.py (V14 - Lógica Híbrida Definitiva)
+# IA (Ferramenta) detecta intenção.
+# Python (extract_hidden_message) executa a lógica.
 import os, io, re, time, asyncio
 from typing import List, Optional, Dict, Any, Tuple
 from urllib.parse import urlparse, parse_qs, unquote, quote, urljoin
@@ -83,7 +85,7 @@ DEFAULT_TOP_K = 8
 # =========================
 # FastAPI App (Único)
 # =========================
-app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="10")
+app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="14.0.0") # Versão 14
 
 origins = [
     "http://localhost:5173",
@@ -385,10 +387,11 @@ def extract_full_pdf_text(pdf_bytes: bytes) -> str:
     except Exception as e_fitz:
          print(f"[DEBUG] FITZ FALHOU com erro: {e_fitz}")
          return ""
-        
+
+# ESTA É A FUNÇÃO PYTHON QUE A V14 VAI USAR
 def extract_hidden_message(raw_text: str) -> str:
-    # Esta função não é mais usada para a rota principal do enigma (agora usamos IA)
-    # Mas mantemos para o endpoint /pdf/solve-enigma (que está quebrado, como sabemos)
+    # Esta função é chamada pela lógica V14 (híbrida)
+    # quando a IA detecta a intenção de "enigma".
     if not raw_text: return ""
     secret_parts = []
     text = re.sub(r"([a-zA-Z])\s*\n\s*([a-zA-Z])", r"\1\2", raw_text)
@@ -1126,39 +1129,30 @@ async def ai_chat_with_pdf(
     _ = Depends(require_api_key)
 ):
     """
-    Endpoint de chat que "lê" um PDF enviado e usa o conteúdo
-    como contexto para responder a pergunta do usuário.
+    Endpoint de chat (V14 - Lógica Híbrida)
     
-    CORRIGIDO (V10): Removemos a lógica de OCR (fotos)
-    e agora usamos o texto bruto (que preserva a capitalização)
-    para resolver o enigma, usando um prompt de IA unificado.
+    - A IA (Gemini) usa uma ferramenta para detectar a INTENÇÃO do usuário (perguntou sobre enigma?)
+    - O Python (função extract_hidden_message) faz a EXTRAÇÃO LÓGICA.
+    - Isso evita a alucinação da IA.
     """
     try:
         pdf_bytes = await file.read()
         
         raw_pdf_text = extract_full_pdf_text(pdf_bytes)
-        rag_text = clean_pdf_text(raw_pdf_text)
         
+        pdf_tools_list = [
+            FunctionDeclaration(
+                name="solve_pdf_enigma",
+                description="Resolve o enigma de 'frase secreta' do PDF. Use esta ferramenta se o usuário perguntar sobre 'enigma', 'frase secreta', 'código', 'mensagem escondida', 'código secreto', 'frase escondida', ou termos similares.",
+                parameters={"type": "object", "properties": {}}
+            )
+        ]
+        pdf_tool = Tool(function_declarations=pdf_tools_list)
+
+        rag_text = clean_pdf_text(raw_pdf_text) # Texto limpo para RAG
         contexto_prompt = f"""
-        Você é um especialista em decifrar enigmas e também um assistente.
-        Use o CONTEÚDO DO DOCUMENTO abaixo para responder a PERGUNTA DO USUÁRIO.
-
-        ==================== REGRAS ESPECIAIS PARA ENIGMAS ====================
-        SE, E SOMENTE SE, a pergunta do usuário for sobre 'enigma', 'frase secreta', 'código', 'mensagem escondida', 'código secreto', 'frase escondida', ou termos similares,
-        siga ESTAS regras para analisar o CONTEÚDO DO DOCUMENTO:
-
-        1.  O CONTEÚDO DO DOCUMENTO é um texto bruto que preserva letras maiúsculas "fora de lugar" (ex: 'contribUI' ou 'custO').
-        2.  Analise o texto palavra por palavra.
-        3.  Encontre TODAS as palavras que contêm letras maiúsculas "fora do padrão" (ex: 'EQuilibra', 'contribUI', 'custO').
-        4.  IGNORE palavras que são siglas (100% maiúsculas, como 'ISO' ou 'SUS').
-        5.  IGNORE palavras que são inícios normais de frase (ex: "Para", "A coordenação", "No controle", "Texto.1") caso antecedam símbolos que indiquem final de frase, como ".", "!", "?".
-        6.  Extraia APENAS as letras maiúsculas das palavras que você encontrou (ex: 'contribUI' -> 'UI', 'custO' -> 'O'). Cada conjunto de letras de uma única palavra é um "bloco".
-        7.  Junte todos os "blocos" em ordem, separados por um espaço, para formar a frase (ex: 'UI' + 'O' -> 'UI O').
-        8.  Responda ao usuário com: "A frase secreta encontrada no arquivo é: [FRASE MONTADA]"
-
-        ==================== OUTRAS PERGUNTAS (RAG) ====================
-        Para TODAS as outras perguntas (ex: 'quantos textos', 'qual o resumo'), 
-        responda APENAS com base no CONTEÚDO DO DOCUMENTO.
+        Você é um assistente. Use o CONTEÚDO DO DOCUMENTO abaixo para responder a PERGUNTA DO USUÁRIO.
+        Responda APENAS com base no CONTEÚDO DO DOCUMENTO.
 
         ==================== CONTEÚDO DO DOCUMENTO ====================
         {rag_text[:10000]} 
@@ -1166,7 +1160,7 @@ async def ai_chat_with_pdf(
 
         PERGUNTA DO USUÁRIO: {pergunta}
         """
-
+        
         data_hoje, (inicio_mes, fim_mes) = iso_date(today()), month_bounds(today())
         nome_usuario_fmt = nome_usuario or "você"
         email_usuario_fmt = email_usuario or "email.desconhecido"
@@ -1180,26 +1174,63 @@ async def ai_chat_with_pdf(
         model = init_model(system_prompt_filled)
         contents = [Content(role="user", parts=[Part.from_text(contexto_prompt)])]
         
-        resp = model.generate_content(contents, tools=[])
+        resp = model.generate_content(contents, tools=[pdf_tool])
         
+        if (
+            resp.candidates and resp.candidates[0].content and 
+            resp.candidates[0].content.parts and 
+            getattr(resp.candidates[0].content.parts[0], "function_call", None)
+        ):
+            call = resp.candidates[0].content.parts[0].function_call
+            
+            if call.name == "solve_pdf_enigma":
+                print("[DEBUG-V14] Ferramenta 'solve_pdf_enigma' foi chamada pela IA.")
+                
+                # 7. EXECUTAR A LÓGICA PYTHON (NÃO IA!)
+                # Nós damos à função Python o texto bruto CORRETO (da V13).
+                secret_message = extract_hidden_message(raw_pdf_text)
+                
+                if secret_message:
+                    final_answer = f"A frase secreta encontrada no arquivo é: {secret_message}"
+                    print(f"[DEBUG-V14] Python encontrou: {secret_message}")
+                else:
+                    final_answer = "Analisei o arquivo, mas não encontrei nenhuma frase secreta."
+                    print("[DEBUG-V14] Python não encontrou a frase.")
+                
+                final_answer = _normalize_answer(final_answer, nome_usuario_fmt)
+                
+                # Formato que o frontend espera (para evitar o crash do 'step.call')
+                response_data = {
+                    "tipo_resposta": "TEXTO_PDF",
+                    "conteudo_texto": final_answer,
+                    "dados": [
+                        {
+                            "call": {"name": "solve_pdf_enigma", "args": {}},
+                            "result": {"status": "OK", "answer": final_answer}
+                        }
+                    ]
+                }
+                return JSONResponse(response_data)
+        
+        # 8. Fallback para RAG (se a ferramenta não foi chamada)
+        print("[DEBUG-V14] Ferramenta de enigma não foi chamada. Usando RAG.")
         final_text = ""
         if resp.candidates and resp.candidates[0].content and resp.candidates[0].content.parts:
             final_text = getattr(resp.candidates[0].content.parts[0], "text", "") or ""
 
-        if not rag_text and "frase secreta" not in final_text:
+        if not rag_text:
              final_text = "Desculpe, não consegui ler o texto desse PDF para responder sua pergunta."
         elif not final_text:
              final_text = "Desculpe, não consegui processar sua solicitação sobre o PDF."
 
-        final_text = re.sub(r"(?i)(aguarde( um instante)?|só um momento|apenas um instante)[^\n]*", "", final_text).strip()
         final_answer = _normalize_answer(final_text, nome_usuario_fmt)
         
         response_data = {
             "tipo_resposta": "TEXTO_PDF",
             "conteudo_texto": final_answer,
-            "dados": [
+            "dados": [ # Formato que o frontend espera
                 {
-                    "call": {"name": "RAG_com_Enigma_Prompt", "args": {"pergunta": pergunta}},
+                    "call": {"name": "RAG_simples", "args": {"pergunta": pergunta}},
                     "result": {"status": "OK", "answer": final_answer}
                 }
             ]
@@ -1222,10 +1253,10 @@ async def pdf_extract_text(file: UploadFile = File(...), _ = Depends(require_api
 async def pdf_solve_enigma(file: UploadFile = File(...), _ = Depends(require_api_key)):
     """
     Endpoint utilitário: Envie um PDF e receba a "frase secreta".
-    (NOTA: Este endpoint ainda usa a função Python antiga, que pode falhar)
+    (NOTA: Este endpoint agora usa a lógica V14, que é confiável)
     """
     pdf_bytes = await file.read()
-    text = extract_full_pdf_text(pdf_bytes)
+    text = extract_full_pdf_text(pdf_bytes) 
     message = extract_hidden_message(text)
     return {"filename": file.filename, "message": message or "Nenhuma mensagem encontrada."}
 
@@ -1239,3 +1270,4 @@ def root():
         "location": LOCATION,
         "main_api_target": TASKS_API_BASE,
     }
+}
