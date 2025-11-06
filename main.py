@@ -1332,21 +1332,16 @@ async def ai_chat_with_pdf(
     Endpoint de chat que "lê" um PDF enviado e usa o conteúdo
     como contexto para responder a pergunta do usuário.
     
-    CORRIGIDO: A ferramenta 'solve_pdf_enigma' agora usa a própria IA
-    para resolver o enigma, em vez da função extract_hidden_message.
+    CORRIGIDO (v8): A ferramenta 'solve_pdf_enigma' agora envia os BYTES
+    do PDF (pdf_bytes) diretamente para a IA (OCR), em vez de
+    extrair o texto (que estava corrompido).
     """
     try:
         pdf_bytes = await file.read()
         
-        # AQUI USAMOS A NOVA FUNÇÃO (fitz)
         raw_pdf_text = extract_full_pdf_text(pdf_bytes)
-        
-        # AQUI USAMOS A NOVA FUNÇÃO (clean)
         rag_text = clean_pdf_text(raw_pdf_text)
         
-        if not raw_pdf_text and not rag_text:
-            raise HTTPException(status_code=422, detail="Não foi possível extrair texto do PDF enviado.")
-
         pdf_tools_list = [
             FunctionDeclaration(
                 name="solve_pdf_enigma",
@@ -1393,13 +1388,13 @@ async def ai_chat_with_pdf(
             call = resp.candidates[0].content.parts[0].function_call
             
             if call.name == "solve_pdf_enigma":
-                                
-                enigma_prompt = f"""
+                                                
+                enigma_prompt_text = f"""
                 Você é um especialista em decifrar enigmas.
-                Abaixo está o texto completo de um documento PDF.
-                Uma mensagem secreta está escondida nele, usando letras maiúsculas "fora de lugar" (no meio de palavras minúsculas ou em palavras TitleCase no meio de frases).
+                O documento PDF anexo contém uma mensagem secreta.
+                A mensagem está escondida usando letras maiúsculas "fora de lugar" (no meio de palavras minúsculas ou em palavras TitleCase no meio de frases).
 
-                Sua tarefa é encontrar essas letras e formar a mensagem secreta.
+                Sua tarefa é ler o PDF (usando OCR), encontrar essas letras e formar a mensagem secreta.
                 
                 REGRAS IMPORTANTES:
                 1. Ignore siglas (palavras 100% maiúsculas, como ISO ou SUS).
@@ -1407,14 +1402,16 @@ async def ai_chat_with_pdf(
                 3. Junte as letras que encontrar para formar PALAVRAS de verdade (ex: 'EQ', 'UI', 'PE' devem ser 'EQUIPE').
                 4. Retorne APENAS a frase secreta completa, e nada mais.
 
-                ==================== CONTEÚDO DO DOCUMENTO (para Enigma) ====================
-                {raw_pdf_text} 
-                ===============================================================
-
                 Qual é a mensagem secreta?
                 """
                 
-                enigma_contents = [Content(role="user", parts=[Part.from_text(enigma_prompt)])]
+                enigma_part_texto = Part.from_text(enigma_prompt_text)
+                enigma_part_pdf = Part.from_data(
+                    data=pdf_bytes, # <-- Enviando os bytes do PDF
+                    mime_type="application/pdf"
+                )
+                
+                enigma_contents = [Content(role="user", parts=[enigma_part_texto, enigma_part_pdf])]
                 
                 enigma_resp = model.generate_content(enigma_contents, tools=[]) # Sem ferramentas
                 
@@ -1425,9 +1422,8 @@ async def ai_chat_with_pdf(
 
                 final_answer = _normalize_answer(f"A frase secreta encontrada no arquivo é: {message}", nome_usuario_fmt)
                 
-                # CORREÇÃO DE LOGS PARA O FRONTEND (da nossa conversa anterior)
                 tool_step_log = {
-                    "call": {"name": "solve_pdf_enigma (via LLM)", "args": {"file": file.filename}},
+                    "call": {"name": "solve_pdf_enigma (via LLM-OCR)", "args": {"file": file.filename}},
                     "result": {"ok": True, "data": message}
                 }
                 
@@ -1442,6 +1438,9 @@ async def ai_chat_with_pdf(
         if resp.candidates and resp.candidates[0].content and resp.candidates[0].content.parts:
             final_text = getattr(resp.candidates[0].content.parts[0], "text", "") or ""
 
+        if not rag_text or not final_text:
+             final_text = "Desculpe, não consegui ler o texto desse PDF para responder sua pergunta. Tente perguntar sobre o enigma."
+
         final_text = re.sub(r"(?i)(aguarde( um instante)?|só um momento|apenas um instante)[^\n]*", "", final_text).strip()
         final_answer = _normalize_answer(final_text, nome_usuario_fmt)
         
@@ -1454,7 +1453,7 @@ async def ai_chat_with_pdf(
 
     except Exception as e:
         raise e
-                
+                    
 @app.post("/pdf/extract-text")
 async def pdf_extract_text(file: UploadFile = File(...), _ = Depends(require_api_key)):
     """
