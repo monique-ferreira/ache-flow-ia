@@ -235,13 +235,18 @@ def _enrich_doc_with_responsavel(doc: Dict[str, Any], employee_map: Dict[str, st
         
     return doc
 
-async def _clean_enigma_string(raw_message: str, model: GenerativeModel) -> str:
+async def _clean_enigma_string(raw_message: str) -> str:
     """
     Usa uma chamada de IA para formatar a string bruta do enigma (ex: "EQ UI PE")
     em uma string legível (ex: "EQUIPE VOCES").
+    
+    NOTA: Esta função inicializa seu PRÓPRIO modelo 'limpo' (sem system_prompt)
+    para garantir que a lógica de limpeza não seja 'contaminada'.
     """
     if not raw_message:
         return ""
+    
+    model = init_model("")
         
     cleanup_prompt = f"""
     Minha função Python extraiu a seguinte frase secreta literal: "{raw_message}"
@@ -1562,17 +1567,15 @@ async def ai_chat_with_pdf(
                 cleanup_contents = [Content(role="user", parts=[Part.from_text(cleanup_prompt)])]
                 cleanup_resp = model.generate_content(cleanup_contents, tools=[])
                                 
-                final_answer_cleaned = ""
-                if cleanup_resp.candidates and cleanup_resp.candidates[0].content and cleanup_resp.candidates[0].content.parts:
-                    final_answer_cleaned = getattr(cleanup_resp.candidates[0].content.parts[0], "text", "").strip()
-
-                if not final_answer_cleaned:
-                    print("[DEBUG-V15] IA de limpeza falhou. Retornando frase bruta.")
+                final_answer_cleaned = await _clean_enigma_string(secret_message_raw)
+                
+                if not final_answer_cleaned or final_answer_cleaned == secret_message_raw:
+                    print("[DEBUG-V15] Helper de limpeza falhou ou retornou bruto. Usando fallback.")
                     final_answer = f"A frase secreta encontrada no arquivo é: {secret_message_raw}"
                 else:
-                    print(f"[DEBUG-V15] IA de limpeza retornou: {final_answer_cleaned}")
+                    print(f"[DEBUG-V15] Helper de limpeza retornou: {final_answer_cleaned}")
                     final_answer = f"A frase secreta encontrada no arquivo é: {final_answer_cleaned}"
-                
+
                 final_answer = _normalize_answer(final_answer, nome_usuario_fmt)
                 
                 response_data = {
@@ -1787,7 +1790,7 @@ async def ai_chat_with_xlsx(
                     result = "Nenhuma mensagem secreta encontrada."
                     final_answer = "Analisei o arquivo, mas não encontrei nenhuma frase secreta."
                 else:
-                    cleaned_result = await _clean_enigma_string(raw_result, model)
+                    cleaned_result = await _clean_enigma_string(raw_result)
                     result = cleaned_result
                     final_answer = f"A frase secreta encontrada no PDF da tarefa '{task_name}' é: {cleaned_result}"
 
