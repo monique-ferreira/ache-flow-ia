@@ -1712,14 +1712,9 @@ async def ai_chat_with_xlsx(
         xlsx_bytes = await file.read()
         df = xlsx_bytes_to_dataframe_preserving_hyperlinks(xlsx_bytes)
         
-<<<<<<< HEAD
-        id_usuario_fmt = id_usuario or "id.desconhecido" 
-        if id_usuario and id_usuario == id_usuario_fmt: # Adiciona o sufixo apenas para debug/context, mas o ID real é limpo
-=======
         id_usuario_fmt = id_usuario
         if not id_usuario_fmt:
             id_usuario_fmt = "id.desconhecido.xlsx" # Fallback
->>>>>>> parent of 05fcf36 (att chat-with-xlsx)
             print("[Context] ATENÇÃO: id_usuario não fornecido para /ai/chat-with-xlsx. A memória não funcionará corretamente.")
         
         nome_usuario_fmt = nome_usuario or "você"
@@ -1860,19 +1855,6 @@ async def ai_chat_with_xlsx(
             
             # 4. Chamar Gemini (reutilizando a lógica do RAG de PDF)
             data_hoje, (inicio_mes, fim_mes) = iso_date(today()), month_bounds(today())
-<<<<<<< HEAD
-            
-            format_args = {
-                "nome_usuario": nome_usuario_fmt,
-                "email_usuario": email_usuario_fmt,
-                "id_usuario": id_usuario_fmt, 
-                "data_hoje": data_hoje,
-                "inicio_mes": inicio_mes,
-                "fim_mes": fim_mes,
-            }
-            system_prompt_filled = SYSTEM_PROMPT.format(**format_args)
-            
-=======
             system_prompt_filled = SYSTEM_PROMPT.format(
                 nome_usuario=nome_usuario_fmt, 
                 email_usuario=(email_usuario or "email.desconhecido"), 
@@ -1881,7 +1863,6 @@ async def ai_chat_with_xlsx(
                 inicio_mes=inicio_mes, 
                 fim_mes=fim_mes,
             )
->>>>>>> parent of 05fcf36 (att chat-with-xlsx)
             rag_model = init_model(system_prompt_filled)
             rag_resp = rag_model.generate_content([rag_prompt], tools=[])
             
@@ -1994,20 +1975,6 @@ async def ai_chat_with_xlsx(
                 ===============================================================
                 PERGUNTA DO USUÁRIO: {pergunta}
                 """                
-<<<<<<< HEAD
-                data_hoje, (inicio_mes, fim_mes) = iso_date(today()), month_bounds(today()) 
-                
-                format_args = {
-                    "nome_usuario": nome_usuario_fmt,
-                    "email_usuario": email_usuario_fmt,
-                    "id_usuario": id_usuario_fmt,
-                    "data_hoje": data_hoje,
-                    "inicio_mes": inicio_mes,
-                    "fim_mes": fim_mes,
-                }
-                system_prompt_filled = SYSTEM_PROMPT.format(**format_args)
-
-=======
                 data_hoje, (inicio_mes, fim_mes) = iso_date(today()), month_bounds(today())
                 system_prompt_filled = SYSTEM_PROMPT.format(
                     nome_usuario=nome_usuario_fmt, 
@@ -2015,7 +1982,6 @@ async def ai_chat_with_xlsx(
                     id_usuario=(id_usuario or "id.desconhecido"),
                     data_hoje=data_hoje, inicio_mes=inicio_mes, fim_mes=fim_mes,
                 )
->>>>>>> parent of 05fcf36 (att chat-with-xlsx)
                 rag_model = init_model(system_prompt_filled)
                 rag_resp = rag_model.generate_content([rag_prompt], tools=[])                
                 if rag_resp.candidates and rag_resp.candidates[0].content and rag_resp.candidates[0].content.parts:
