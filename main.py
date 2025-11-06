@@ -85,7 +85,7 @@ DEFAULT_TOP_K = 8
 # =========================
 # FastAPI App (Único)
 # =========================
-app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="14.0.0") # Versão 14
+app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importação)", version="15.0.0")
 
 origins = [
     "http://localhost:5173",
@@ -1129,11 +1129,11 @@ async def ai_chat_with_pdf(
     _ = Depends(require_api_key)
 ):
     """
-    Endpoint de chat (V14 - Lógica Híbrida)
+    Endpoint de chat (V15 - Lógica Híbrida + Limpeza de IA)
     
-    - A IA (Gemini) usa uma ferramenta para detectar a INTENÇÃO do usuário (perguntou sobre enigma?)
-    - O Python (função extract_hidden_message) faz a EXTRAÇÃO LÓGICA.
-    - Isso evita a alucinação da IA.
+    1. IA (Ferramenta) detecta a INTENÇÃO de "enigma".
+    2. Python (extract_hidden_message) faz a EXTRAÇÃO LÓGICA (bruta).
+    3. IA (2ª chamada) "limpa" o resultado do Python (acentos, espaços).
     """
     try:
         pdf_bytes = await file.read()
@@ -1149,7 +1149,7 @@ async def ai_chat_with_pdf(
         ]
         pdf_tool = Tool(function_declarations=pdf_tools_list)
 
-        rag_text = clean_pdf_text(raw_pdf_text) # Texto limpo para RAG
+        rag_text = clean_pdf_text(raw_pdf_text) 
         contexto_prompt = f"""
         Você é um assistente. Use o CONTEÚDO DO DOCUMENTO abaixo para responder a PERGUNTA DO USUÁRIO.
         Responda APENAS com base no CONTEÚDO DO DOCUMENTO.
@@ -1186,33 +1186,76 @@ async def ai_chat_with_pdf(
             if call.name == "solve_pdf_enigma":
                 print("[DEBUG-V14] Ferramenta 'solve_pdf_enigma' foi chamada pela IA.")
                 
-                # 7. EXECUTAR A LÓGICA PYTHON (NÃO IA!)
-                # Nós damos à função Python o texto bruto CORRETO (da V13).
-                secret_message = extract_hidden_message(raw_pdf_text)
+                secret_message_raw = extract_hidden_message(raw_pdf_text)
                 
-                if secret_message:
-                    final_answer = f"A frase secreta encontrada no arquivo é: {secret_message}"
-                    print(f"[DEBUG-V14] Python encontrou: {secret_message}")
-                else:
+                if not secret_message_raw:
+                    print("[DEBUG-V15] Python (V14) não encontrou a frase.")
                     final_answer = "Analisei o arquivo, mas não encontrei nenhuma frase secreta."
-                    print("[DEBUG-V14] Python não encontrou a frase.")
+                    final_answer = _normalize_answer(final_answer, nome_usuario_fmt)
+                    
+                    response_data = {
+                        "tipo_resposta": "TEXTO_PDF",
+                        "conteudo_texto": final_answer,
+                        "dados": [
+                            {
+                                "call": {"name": "solve_pdf_enigma", "args": {}},
+                                "result": {"status": "NOT_FOUND", "answer": final_answer}
+                            }
+                        ]
+                    }
+                    return JSONResponse(response_data)
+
+                print(f"[DEBUG-V15] Python (V14) encontrou: {secret_message_raw}")
+                
+                # ----------------------------------------------------
+                # NOVO PASSO (V15): LIMPEZA PELA IA
+                # ----------------------------------------------------
+                
+                cleanup_prompt = f"""
+                Minha função Python extraiu a seguinte frase secreta de um documento.
+                A extração é literal e agrupa apenas as letras maiúsculas, com espaçamento incorreto.
+                
+                Frase extraída: "{secret_message_raw}"
+                
+                Sua tarefa é "limpar" esta frase para que ela se torne legível.
+                1.  Combine os blocos de letras para formar palavras em português (ex: "VO CES" -> "VOCES").
+                2.  Adicione a acentuação correta (ex: 'VOCES' -> 'VOCÊS', 'SAO' -> 'SÃO').
+                3.  Mantenha a ordem exata das letras.
+                4.  NÃO adicione, remova ou altere nenhuma letra (apenas adicione acentos). A frase deve usar EXATAMENTE as letras da "Frase extraída".
+                
+                Responda APENAS com a frase limpa e formatada.
+                """
+                
+                print("[DEBUG-V15] Chamando IA (Gemini) para limpeza...")
+                
+                cleanup_contents = [Content(role="user", parts=[Part.from_text(cleanup_prompt)])]
+                cleanup_resp = model.generate_content(cleanup_contents, tools=[])
+                
+                final_answer_cleaned = ""
+                if cleanup_resp.candidates and cleanup_resp.candidates[0].content and cleanup_resp.candidates[0].content.parts:
+                    final_answer_cleaned = getattr(cleanup_resp.candidates[0].content.parts[0], "text", "").strip()
+
+                if not final_answer_cleaned:
+                    print("[DEBUG-V15] IA de limpeza falhou. Retornando frase bruta.")
+                    final_answer = f"A frase secreta encontrada no arquivo é: {secret_message_raw}"
+                else:
+                    print(f"[DEBUG-V15] IA de limpeza retornou: {final_answer_cleaned}")
+                    final_answer = f"A frase secreta encontrada no arquivo é: {final_answer_cleaned}"
                 
                 final_answer = _normalize_answer(final_answer, nome_usuario_fmt)
                 
-                # Formato que o frontend espera (para evitar o crash do 'step.call')
                 response_data = {
                     "tipo_resposta": "TEXTO_PDF",
                     "conteudo_texto": final_answer,
                     "dados": [
                         {
                             "call": {"name": "solve_pdf_enigma", "args": {}},
-                            "result": {"status": "OK", "answer": final_answer}
+                            "result": {"status": "OK", "raw": secret_message_raw, "cleaned": final_answer_cleaned}
                         }
                     ]
                 }
                 return JSONResponse(response_data)
         
-        # 8. Fallback para RAG (se a ferramenta não foi chamada)
         print("[DEBUG-V14] Ferramenta de enigma não foi chamada. Usando RAG.")
         final_text = ""
         if resp.candidates and resp.candidates[0].content and resp.candidates[0].content.parts:
@@ -1239,7 +1282,7 @@ async def ai_chat_with_pdf(
 
     except Exception as e:
         raise e
-                    
+                        
 @app.post("/pdf/extract-text")
 async def pdf_extract_text(file: UploadFile = File(...), _ = Depends(require_api_key)):
     """
