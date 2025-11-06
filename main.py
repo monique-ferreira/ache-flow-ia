@@ -88,8 +88,8 @@ app = FastAPI(title=f"{APPLICATION_NAME} (Serviço Unificado de IA e Importaçã
 origins = [
     "http://localhost:5173",
     "http://localhost:5174",
-    "https.acheflow.web.app",
-    "https.acheflow.firebaseapp.com"
+    "https://ache-flow.vercel.app",
+    "https://www.ache-flow.vercel.app"
 ]
 
 app.add_middleware(
