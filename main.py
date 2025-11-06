@@ -235,57 +235,6 @@ def _enrich_doc_with_responsavel(doc: Dict[str, Any], employee_map: Dict[str, st
         
     return doc
 
-async def _clean_enigma_string(raw_message: str) -> str:
-    """
-    Usa uma chamada de IA para formatar a string bruta do enigma (ex: "EQ UI PE")
-    em uma string legível (ex: "EQUIPE VOCES").
-    
-    NOTA: Esta função inicializa seu PRÓPRIO modelo 'limpo' (sem system_prompt)
-    para garantir que a lógica de limpeza não seja 'contaminada'.
-    """
-    if not raw_message:
-        return ""
-    
-    model = init_model("")
-        
-    cleanup_prompt = f"""
-    Minha função Python extraiu a seguinte frase secreta literal: "{raw_message}"
-    
-    Sua tarefa é formatar esta frase para que ela se torne legível em português, seguindo regras MUITO ESTRITAS:
-    
-    1.  **Ordem e Letras:** A ordem das letras e as próprias letras NÃO PODEM MUDAR.
-        (Exemplo: O bloco 'EQ UI PE' deve se tornar 'EQUIPE'. O 'Q' não pode ser inventado. O 'E' inicial não pode virar 'É'.)
-    2.  **Acentuação:** Adicione a acentuação correta onde necessário. (Ex: 'VOCES' -> 'VOCÊS', 'SAO' -> 'SÃO').
-    3.  **Sem Pontuação:** NÃO adicione NENHUMA pontuação (vírgulas, pontos de exclamação, etc.). A saída deve ser "texto liso".
-    4.  **Caixa Alta:** A saída final deve ser TODA EM MAIÚSCULAS.
-    5.  **Palavras Estrangeiras:** PODE HAVER palavras estrangeiras (ex: 'TEAM', 'PROJECT', INNOVATION, etc.), mas mantenha a acentuação e caixa alta conforme as regras acima; se atente ao contexto para descobrir se é uma palavra estrangeira ou brasileira.
-    
-    Frase Bruta: "{raw_message}"
-    Transforme isso em uma frase limpa, em português, toda em maiúsculas, sem pontuação.
-    
-    Exemplo de 'antes' e 'depois':
-    - Antes: "EQ UI PE VO C E S PA SS AR AM"
-    - Depois: "EQUIPE VOCÊS PASSARAM"
-    
-    Responda APENAS com a frase final limpa.
-    """
-    
-    print("[DEBUG-CLEANUP] Chamando IA (Gemini) para limpeza ESTRITA...")
-    
-    cleanup_contents = [Content(role="user", parts=[Part.from_text(cleanup_prompt)])]
-    cleanup_resp = model.generate_content(cleanup_contents, tools=[])
-                    
-    final_answer_cleaned = ""
-    if cleanup_resp.candidates and cleanup_resp.candidates[0].content and cleanup_resp.candidates[0].content.parts:
-        final_answer_cleaned = getattr(cleanup_resp.candidates[0].content.parts[0], "text", "").strip()
-
-    if not final_answer_cleaned:
-        print("[DEBUG-CLEANUP] IA de limpeza falhou. Retornando frase bruta.")
-        return raw_message
-    else:
-        print(f"[DEBUG-CLEANUP] IA de limpeza retornou: {final_answer_cleaned}")
-        return final_answer_cleaned
-
 # =========================
 # Helpers de Download (PDF/XLSX)
 # =========================
@@ -1562,18 +1511,20 @@ async def ai_chat_with_pdf(
                 Responda APENAS com a frase final limpa.
                 """
                 
-                print("[DEBUG-V16] Chamando IA (Gemini) para limpeza ESTRITA...")
+                print("[DEBUG-V16] Chamando IA (Gemini) para limpeza ESTRITA (Lógica Inline)...")
                 
                 cleanup_contents = [Content(role="user", parts=[Part.from_text(cleanup_prompt)])]
                 cleanup_resp = model.generate_content(cleanup_contents, tools=[])
                                 
-                final_answer_cleaned = await _clean_enigma_string(secret_message_raw)
-                
+                final_answer_cleaned = ""
+                if cleanup_resp.candidates and cleanup_resp.candidates[0].content and cleanup_resp.candidates[0].content.parts:
+                    final_answer_cleaned = getattr(cleanup_resp.candidates[0].content.parts[0], "text", "").strip()
+
                 if not final_answer_cleaned or final_answer_cleaned == secret_message_raw:
-                    print("[DEBUG-V15] Helper de limpeza falhou ou retornou bruto. Usando fallback.")
+                    print("[DEBUG-V15] IA de limpeza (Inline) falhou. Retornando frase bruta.")
                     final_answer = f"A frase secreta encontrada no arquivo é: {secret_message_raw}"
                 else:
-                    print(f"[DEBUG-V15] Helper de limpeza retornou: {final_answer_cleaned}")
+                    print(f"[DEBUG-V15] IA de limpeza (Inline) retornou: {final_answer_cleaned}")
                     final_answer = f"A frase secreta encontrada no arquivo é: {final_answer_cleaned}"
 
                 final_answer = _normalize_answer(final_answer, nome_usuario_fmt)
@@ -1620,7 +1571,7 @@ async def ai_chat_with_pdf(
 @app.post("/ai/chat-with-xlsx")
 async def ai_chat_with_xlsx(
     pergunta: str = Form(...),
-    file: UploadFile = File(...), # TODO: Adicionar suporte a xlsx_url/google_sheet_url se necessário
+    file: UploadFile = File(...),
     nome_usuario: Optional[str] = Form(None),
     email_usuario: Optional[str] = Form(None),
     id_usuario: Optional[str] = Form(None),
@@ -1790,10 +1741,45 @@ async def ai_chat_with_xlsx(
                     result = "Nenhuma mensagem secreta encontrada."
                     final_answer = "Analisei o arquivo, mas não encontrei nenhuma frase secreta."
                 else:
-                    cleaned_result = await _clean_enigma_string(raw_result)
-                    result = cleaned_result
-                    final_answer = f"A frase secreta encontrada no PDF da tarefa '{task_name}' é: {cleaned_result}"
+                    cleanup_prompt = f"""
+                    Minha função Python extraiu a seguinte frase secreta literal: "{raw_result}"
+                    
+                    Sua tarefa é formatar esta frase para que ela se torne legível em português, seguindo regras MUITO ESTRITAS:
+                    
+                    1.  **Ordem e Letras:** A ordem das letras e as próprias letras NÃO PODEM MUDAR.
+                        (Exemplo: O bloco 'EQ UI PE' deve se tornar 'EQUIPE'. O 'Q' não pode ser inventado. O 'E' inicial não pode virar 'É'.)
+                    2.  **Acentuação:** Adicione a acentuação correta onde necessário. (Ex: 'VOCES' -> 'VOCÊS', 'SAO' -> 'SÃO').
+                    3.  **Sem Pontuação:** NÃO adicione NENHUMA pontuação (vírgulas, pontos de exclamação, etc.). A saída deve ser "texto liso".
+                    4.  **Caixa Alta:** A saída final deve ser TODA EM MAIÚSCULAS.
+                    5.  **Palavras Estrangeiras:** PODE HAVER palavras estrangeiras (ex: 'TEAM', 'PROJECT', INNOVATION, etc.), mas mantenha a acentuação e caixa alta conforme as regras acima; se atente ao contexto para descobrir se é uma palavra estrangeira ou brasileira.
+                    
+                    Frase Bruta: "{raw_result}"
+                    Transforme isso em uma frase limpa, em português, toda em maiúsculas, sem pontuação.
+                    
+                    Exemplo de 'antes' e 'depois':
+                    - Antes: "EQ UI PE VO C E S PA SS AR AM"
+                    - Depois: "EQUIPE VOCÊS PASSARAM"
+                    
+                    Responda APENAS com a frase final limpa.
+                    """
+                    
+                    print("[DEBUG-V17-CLEANUP] Chamando IA (Gemini) para limpeza ESTRITA (Lógica Inline)...")
+                    
+                    cleanup_contents = [Content(role="user", parts=[Part.from_text(cleanup_prompt)])]
+                    cleanup_resp = model.generate_content(cleanup_contents, tools=[])
+                                    
+                    cleaned_result = ""
+                    if cleanup_resp.candidates and cleanup_resp.candidates[0].content and cleanup_resp.candidates[0].content.parts:
+                        cleaned_result = getattr(cleanup_resp.candidates[0].content.parts[0], "text", "").strip()
 
+                    if not cleaned_result or cleaned_result == raw_result:
+                        print("[DEBUG-V17-CLEANUP] IA de limpeza (Inline) falhou. Retornando frase bruta.")
+                        result = raw_result
+                        final_answer = f"A frase secreta encontrada no PDF da tarefa '{task_name}' é: {raw_result}"
+                    else:
+                        print("[DEBUG-V17-CLEANUP] IA de limpeza (Inline) retornou: {cleaned_result}")
+                        result = cleaned_result
+                        final_answer = f"A frase secreta encontrada no PDF da tarefa '{task_name}' é: {cleaned_result}"
                 tool_steps.append({"call": "solve_pdf_enigma_from_text", "args": {"task": task_name}, "result": result})
 
             else:
@@ -1830,7 +1816,7 @@ async def ai_chat_with_xlsx(
         })
     except Exception as e:
         raise e
-    
+        
 @app.post("/pdf/extract-text")
 async def pdf_extract_text(file: UploadFile = File(...), _ = Depends(require_api_key)):
     """
