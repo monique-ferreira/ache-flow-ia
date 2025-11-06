@@ -349,21 +349,43 @@ def xlsx_bytes_to_dataframe_preserving_hyperlinks(xlsx_bytes: bytes) -> pd.DataF
 
 def extract_full_pdf_text(pdf_bytes: bytes) -> str:
     text_all = ""
+    print("[DEBUG] Iniciando extract_full_pdf_text V13 (Super-Debug)...")
+    
     try:
+        print("[DEBUG] Tentando extração com PDFPLUMBER...")
+        
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            text_all = "\n".join((page.extract_text(x_tolerance=3, y_tolerance=3) or "") for page in pdf.pages if page.extract_text())
+        
+        if text_all.strip(): 
+            print("[DEBUG] PDFPLUMBER SUCESSO. Retornando texto.")
+            print(f"[DEBUG] Amostra PDFPLUMBER: {text_all.strip()[:200]}")
+            return text_all
+        
+        print("[DEBUG] PDFPLUMBER não retornou texto. Fallback para PyMuPDF/fitz.")
+        
+    except Exception as e:
+        print(f"[DEBUG] PDFPLUMBER FALHOU com erro: {e}. Fallback para PyMuPDF/fitz.")
+    
+    try:
+        print("[DEBUG] Tentando extração com FITZ (PyMuPDF)...")
+        text_all_fitz = ""
         with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
             for page in doc:
-                text_all += page.get_text("text") or ""
-        return text_all
-    except Exception as e:
-        print(f"Erro ao extrair texto completo com PyMuPDF/fitz: {e}")
-        try:
-            with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-                text_all = "\n".join((page.extract_text() or "") for page in pdf.pages if page.extract_text())
-            return text_all
-        except Exception as e_plumber:
-             print(f"Erro de fallback com pdfplumber: {e_plumber}")
-             return ""
-    
+                text_all_fitz += page.get_text("text") or ""
+        
+        if text_all_fitz.strip():
+            print("[DEBUG] FITZ SUCESSO. Retornando texto.")
+            print(f"[DEBUG] Amostra FITZ: {text_all_fitz.strip()[:200]}") 
+            return text_all_fitz
+        else:
+            print("[DEBUG] FITZ não retornou texto. Retornando vazio.")
+            return ""
+            
+    except Exception as e_fitz:
+         print(f"[DEBUG] FITZ FALHOU com erro: {e_fitz}")
+         return ""
+        
 def extract_hidden_message(raw_text: str) -> str:
     # Esta função não é mais usada para a rota principal do enigma (agora usamos IA)
     # Mas mantemos para o endpoint /pdf/solve-enigma (que está quebrado, como sabemos)

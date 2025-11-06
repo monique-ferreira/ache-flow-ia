@@ -1,2 +1,6 @@
 .env
 service-account-key.json
+test_pdf.py
+Doc.Teste.pdf
+venv
+__pycache__
