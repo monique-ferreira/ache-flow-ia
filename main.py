@@ -128,10 +128,18 @@ async def all_exception_handler(request, exc):
         detail = exc.detail
         status_code = exc.status_code
 
+    origin = request.headers.get("Origin")
+    cors_headers = {}
+    if origin and any(o in origin for o in origins):
+        cors_headers["Access-Control-Allow-Origin"] = origin
+        cors_headers["Access-Control-Allow-Credentials"] = "true"
+
     trace_info = tb[-4000:] if "localhost" in str(request.url) or os.getenv("ENV_MODE") == "debug" else None
+    
     return JSONResponse(
         status_code=status_code,
         content={"erro": "internal_error", "detail": detail, "trace": trace_info},
+        headers=cors_headers # <--- NOVO: Adicionar cabeçalhos aqui
     )
 
 # =========================
@@ -1272,8 +1280,12 @@ async def handle_file_chat_from_context(req: ChatRequest, context_doc: Dict[str,
 
         data_hoje, (inicio_mes, fim_mes) = iso_date(today()), month_bounds(today())
         system_prompt_filled = SYSTEM_PROMPT.format(
-            nome_usuario=nome_usuario_fmt, email_usuario=email_usuario_fmt, id_usuario=id_usuario_fmt,
-            data_hoje=data_hoje, inicio_mes=inicio_mes, fim_mes=fim_mes,
+            nome_usuario=nome_usuario_fmt, 
+            email_usuario=email_usuario_fmt, 
+            id_usuario=id_usuario_fmt,
+            data_hoje=data_hoje, 
+            inicio_mes=inicio_mes, 
+            fim_mes=fim_mes,
         )
         model = init_model(system_prompt_filled)
 
@@ -1706,6 +1718,7 @@ async def ai_chat_with_xlsx(
             print("[Context] ATENÇÃO: id_usuario não fornecido para /ai/chat-with-xlsx. A memória não funcionará corretamente.")
         
         nome_usuario_fmt = nome_usuario or "você"
+        nome_usuario_fmt = nome_usuario or "você"
         email_usuario_fmt = email_usuario or "email.desconhecido"
         
         if "Nome" not in df.columns or "Documento Referência" not in df.columns:
@@ -1844,9 +1857,11 @@ async def ai_chat_with_xlsx(
             data_hoje, (inicio_mes, fim_mes) = iso_date(today()), month_bounds(today())
             system_prompt_filled = SYSTEM_PROMPT.format(
                 nome_usuario=nome_usuario_fmt, 
-                email_usuario=email_usuario_fmt, 
-                id_usuario=id_usuario_fmt,
-                data_hoje=data_hoje, inicio_mes=inicio_mes, fim_mes=fim_mes,
+                email_usuario=(email_usuario or "email.desconhecido"), 
+                id_usuario=(id_usuario or "id.desconhecido"),
+                data_hoje=data_hoje, 
+                inicio_mes=inicio_mes, 
+                fim_mes=fim_mes,
             )
             rag_model = init_model(system_prompt_filled)
             rag_resp = rag_model.generate_content([rag_prompt], tools=[])
