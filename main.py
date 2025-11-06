@@ -8,6 +8,7 @@ import requests
 import httpx
 import pandas as pd
 import pdfplumber
+import fitz # PyMuPDF (ESTE IMPORT FOI ADICIONADO)
 from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, Depends
 from fastapi.responses import JSONResponse
 # --- ADICIONADO IMPORT FALTANTE ---
@@ -336,11 +337,22 @@ def fetch_pdf_bytes(url: str):
         if r["status"] == 200 and _is_pdf(r["content_type"], r["content"]): return r["content"]
     raise ValueError(f"Não foi possível obter PDF (último status={last['status'] if last else None}, content-type={last['content_type'] if last else None}).")
 
+# --- ESTA FUNÇÃO FOI SUBSTITUÍDA (Linha 379) ---
 def clean_pdf_text(s: str) -> str:
+    """
+    Limpa o texto extraído para RAG.
+    """
     if not s: return s
-    s = re.sub(r"[ \t]*\n[ \t]*", " ", s); s = re.sub(r"\s{2,}", " ", s)
-    s = re.sub(r"\s+([,;\.\!\?\:\)])", r"\1", s); s = re.sub(r"([,;\.\!\?\:])([^\s])", r"\1 \2", s)
+    # Substitui quebras de linha únicas (mas não parágrafos) por espaço
+    s = re.sub(r"([^\n])\n([^\n])", r"\1 \2", s)
+    # Normaliza múltiplos espaços
+    s = re.sub(r"[ \t\r\f\v]+", " ", s)
+    # Remove espaços antes de pontuação
+    s = re.sub(r"\s+([,;\.\!\?\:\)])", r"\1", s)
+    # Garante espaço depois de pontuação
+    s = re.sub(r"([,;\.\!\?\:])([^\s])", r"\1 \2", s)
     return s.strip()
+# --- FIM DA SUBSTITUIÇÃO ---
 
 def _anchor_regex_flex(label: str) -> re.Pattern:
     m = re.search(r"(?i)texto\.?(\d+)", label or "");
@@ -385,18 +397,32 @@ def xlsx_bytes_to_dataframe_preserving_hyperlinks(xlsx_bytes: bytes) -> pd.DataF
         rows.append(record)
     return pd.DataFrame(rows)
 
+# --- ESTA FUNÇÃO FOI SUBSTITUÍDA (Linha 390) ---
 def extract_full_pdf_text(pdf_bytes: bytes) -> str:
     """
-    Extrai TODO o texto de todas as páginas de um PDF.
+    Extrai TODO o texto de todas as páginas de um PDF usando PyMuPDF (fitz).
     Retorna o texto bruto, preservando as quebras de linha originais.
+    Esta versão é mais robusta para fontes complexas.
     """
+    text_all = ""
     try:
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            text_all = "\n".join((page.extract_text() or "") for page in pdf.pages if page.extract_text())
-        return text_all 
+        # Abre o PDF a partir dos bytes em memória
+        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+            for page in doc:
+                # Extrai texto como blocos, preservando a formatação (importante para o enigma)
+                text_all += page.get_text("text") or ""
+        return text_all
     except Exception as e:
-        print(f"Erro ao extrair texto completo do PDF: {e}")
-        return ""
+        print(f"Erro ao extrair texto completo com PyMuPDF/fitz: {e}")
+        # Tenta o fallback (pdfplumber) se o fitz falhar
+        try:
+            with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+                text_all = "\n".join((page.extract_text() or "") for page in pdf.pages if page.extract_text())
+            return text_all
+        except Exception as e_plumber:
+             print(f"Erro de fallback com pdfplumber: {e_plumber}")
+             return ""
+# --- FIM DA SUBSTITUIÇÃO ---
     
 def extract_hidden_message(raw_text: str) -> str:
     """
@@ -752,7 +778,7 @@ Sua tarefa é preencher os argumentos para as ferramentas.
 - **SE** você conseguir extrair TODOS os argumentos **OBRIGATÓRIOS** (como `nome`, `prazo`, `situacao`, `responsavel`):
     - **NÃO PERGUNTE NADA MAIS.** Chame a ferramenta imediatamente.
     - Use `None` (ou simplesmente omita) para quaisquer argumentos **OPCIONAIS** (como `projeto_descricao` ou `projeto_categoria`) que não foram fornecidos.
-- **SE** algum argumento **OBRIGATÓRIO** estiver faltando:
+- **SE** algum argumento **OBRIGATÓÓRIO** estiver faltando:
     - **AÍ SIM,** pergunte APENAS pelos argumentos **OBRIGATÓRIOS** que faltam.
     - **NÃO** pergunte por argumentos opcionais.
 
@@ -1312,8 +1338,10 @@ async def ai_chat_with_pdf(
     try:
         pdf_bytes = await file.read()
         
+        # AQUI USAMOS A NOVA FUNÇÃO (fitz)
         raw_pdf_text = extract_full_pdf_text(pdf_bytes)
         
+        # AQUI USAMOS A NOVA FUNÇÃO (clean)
         rag_text = clean_pdf_text(raw_pdf_text)
         
         if not raw_pdf_text and not rag_text:
@@ -1397,13 +1425,19 @@ async def ai_chat_with_pdf(
 
                 final_answer = _normalize_answer(f"A frase secreta encontrada no arquivo é: {message}", nome_usuario_fmt)
                 
+                # CORREÇÃO DE LOGS PARA O FRONTEND (da nossa conversa anterior)
+                tool_step_log = {
+                    "call": {"name": "solve_pdf_enigma (via LLM)", "args": {"file": file.filename}},
+                    "result": {"ok": True, "data": message}
+                }
+                
                 response_data = {
                     "tipo_resposta": "TEXTO_PDF",
                     "conteudo_texto": final_answer,
-                    "dados": [{"tool_used": "solve_pdf_enigma (via LLM)"}] # Log
+                    "dados": [tool_step_log]
                 }
                 return JSONResponse(response_data)
-
+            
         final_text = ""
         if resp.candidates and resp.candidates[0].content and resp.candidates[0].content.parts:
             final_text = getattr(resp.candidates[0].content.parts[0], "text", "") or ""
@@ -1427,7 +1461,7 @@ async def pdf_extract_text(file: UploadFile = File(...), _ = Depends(require_api
     Endpoint utilitário: Envie um PDF e receba o texto completo.
     """
     pdf_bytes = await file.read()
-    text = extract_full_pdf_text(pdf_bytes)
+    text = extract_full_pdf_text(pdf_bytes) # Usará a nova função (fitz)
     return {"filename": file.filename, "text": text}
 
 @app.post("/pdf/solve-enigma")
@@ -1437,8 +1471,8 @@ async def pdf_solve_enigma(file: UploadFile = File(...), _ = Depends(require_api
     (NOTA: Este endpoint ainda usa a função Python antiga, que pode falhar)
     """
     pdf_bytes = await file.read()
-    text = extract_full_pdf_text(pdf_bytes)
-    message = extract_hidden_message(text)
+    text = extract_full_pdf_text(pdf_bytes) # Usará a nova função (fitz)
+    message = extract_hidden_message(text) # A função antiga (python)
     return {"filename": file.filename, "message": message or "Nenhuma mensagem encontrada."}
 
 @app.get("/")
@@ -1451,3 +1485,4 @@ def root():
         "location": LOCATION,
         "main_api_target": TASKS_API_BASE,
     }
+# O '}' extra que causava o SyntaxError foi removido
