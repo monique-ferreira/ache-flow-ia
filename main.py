@@ -63,6 +63,7 @@ MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/acheflow")
 COLL_PROJETOS = os.getenv("MONGO_COLL_PROJETOS", "projetos")
 COLL_TAREFAS = os.getenv("MONGO_COLL_TAREFAS", "tarefas")
 COLL_FUNCIONARIOS = os.getenv("MONGO_COLL_FUNCIONARIOS", "funcionarios")
+COLL_CONTEXTOS = os.getenv("MONGO_COLL_CONTEXTOS", "chat_contexts")
 
 TASKS_API_BASE           = os.getenv("TASKS_API_BASE", "https://ache-flow-back.onrender.com").rstrip("/")
 TASKS_API_PROJECTS_PATH  = os.getenv("TASKS_API_PROJECTS_PATH", "/projetos")
@@ -1174,11 +1175,133 @@ async def chat_with_tools(user_msg: str, history: Optional[List[HistoryMessage]]
             
     return {"answer": _normalize_answer("Concluí as ações solicitadas.", nome_usuario), "tool_steps": tool_steps}
 
+async def handle_pdf_chat_from_context(req: ChatRequest, context_doc: Dict[str, Any]) -> JSONResponse:
+    """
+    Processa uma pergunta de chat contra um contexto de texto já salvo (do Mongo).
+    Esta função contém a lógica de RAG e Enigma.
+    """
+    pergunta = req.pergunta
+    raw_pdf_text = context_doc.get("text_content", "")
+    context_filename = context_doc.get("filename", "o arquivo")
+
+    nome_usuario_fmt = req.nome_usuario or "você"
+    email_usuario_fmt = req.email_usuario or "email.desconcido"
+    id_usuario_fmt = req.id_usuario or "id.desconhecido"
+
+    try:
+        pdf_tools_list = [
+            FunctionDeclaration(
+                name="solve_pdf_enigma",
+                description="""CHAMADA OBRIGATÓRIA. Use esta ferramenta se a pergunta do usuário contiver QUALQUER palavra relacionada a: 'enigma', 'frase secreta', 'código secreto', 'mensagem escondida', 'frase escondida', 'código', 'decifrar', 'encontrar a frase'. Não use RAG se essas palavras estiverem presentes.""",
+                parameters={"type": "object", "properties": {}}
+            )
+        ]
+        pdf_tool = Tool(function_declarations=pdf_tools_list)
+
+        rag_text = clean_pdf_text(raw_pdf_text)
+        contexto_prompt = f"""
+        Você é um assistente. Use o CONTEÚDO DO DOCUMENTO abaixo (referente ao arquivo '{context_filename}') para responder a PERGUNTA DO USUÁRIO.
+        Responda APENAS com base no CONTEÚDO DO DOCUMENTO.
+
+        ==================== CONTEÚDO DO DOCUMENTO ====================
+        {rag_text[:10000]}
+        ===============================================================
+
+        PERGUNTA DO USUÁRIO: {pergunta}
+        """
+
+        data_hoje, (inicio_mes, fim_mes) = iso_date(today()), month_bounds(today())
+        system_prompt_filled = SYSTEM_PROMPT.format(
+            nome_usuario=nome_usuario_fmt, email_usuario=email_usuario_fmt, id_usuario=id_usuario_fmt,
+            data_hoje=data_hoje, inicio_mes=inicio_mes, fim_mes=fim_mes,
+        )
+        model = init_model(system_prompt_filled)
+        contents = [Content(role="user", parts=[Part.from_text(contexto_prompt)])]
+
+        resp = model.generate_content(contents, tools=[pdf_tool])
+
+        if (
+            resp.candidates and resp.candidates[0].content and
+            resp.candidates[0].content.parts and
+            getattr(resp.candidates[0].content.parts[0], "function_call", None)
+        ):
+            call = resp.candidates[0].content.parts[0].function_call
+            if call.name == "solve_pdf_enigma":
+                print(f"[Context-Chat] Usuário {id_usuario_fmt} pediu enigma do contexto.")
+                secret_message_raw = extract_hidden_message(raw_pdf_text) # Usa o texto salvo
+
+                if not secret_message_raw:
+                    final_answer = "Analisei o arquivo, mas não encontrei nenhuma frase secreta."
+                else:
+                    cleanup_prompt = f"""
+                    Minha função Python extraiu a seguinte frase secreta literal: "{secret_message_raw}"
+                    Sua tarefa é formatar esta frase... (etc.)
+                    ...
+                    Responda APENAS com a frase final limpa.
+                    """
+                    cleanup_contents = [Content(role="user", parts=[Part.from_text(cleanup_prompt)])]
+                    cleanup_resp = model.generate_content(cleanup_contents, tools=[])
+                    
+                    final_answer_cleaned = ""
+                    if cleanup_resp.candidates and cleanup_resp.candidates[0].content and cleanup_resp.candidates[0].content.parts:
+                        final_answer_cleaned = getattr(cleanup_resp.candidates[0].content.parts[0], "text", "").strip()
+
+                    if not final_answer_cleaned:
+                        final_answer = f"A frase secreta encontrada no arquivo é: {secret_message_raw}"
+                    else:
+                        final_answer = f"A frase secreta encontrada no arquivo é: {final_answer_cleaned}"
+
+                final_answer = _normalize_answer(final_answer, nome_usuario_fmt)
+                response_data = {
+                    "tipo_resposta": "TEXTO_PDF",
+                    "conteudo_texto": final_answer,
+                    "dados": [{"call": {"name": "solve_pdf_enigma_context"}, "result": {"status": "OK", "raw": secret_message_raw}}]
+                }
+                return JSONResponse(response_data)
+
+        print(f"[Context-Chat] Usuário {id_usuario_fmt} pediu RAG do contexto.")
+        final_text = ""
+        if resp.candidates and resp.candidates[0].content and resp.candidates[0].content.parts:
+            final_text = getattr(resp.candidates[0].content.parts[0], "text", "") or ""
+        if not rag_text:
+             final_text = f"Desculpe, não consegui ler o texto do arquivo '{context_filename}' que está na memória."
+        elif not final_text:
+             final_text = "Desculpe, não consegui processar sua solicitação sobre o PDF."
+        final_answer = _normalize_answer(final_text, nome_usuario_fmt)
+        response_data = {
+            "tipo_resposta": "TEXTO_PDF",
+            "conteudo_texto": final_answer,
+            "dados": [{"call": {"name": "RAG_context"}, "result": {"status": "OK", "answer": final_answer}}]
+        }
+        return JSONResponse(response_data)
+    except Exception as e:
+        return JSONResponse(
+            status_code=200,
+            content={
+                "tipo_resposta": "TEXTO",
+                "conteudo_texto": f"Desculpe, tive um erro ao processar sua pergunta sobre o arquivo: {str(e)}",
+                "dados": [{"error": str(e)}]
+            }
+        )
+
 # =========================
 # Rotas FastAPI
 # =========================
 @app.post("/ai/chat")
 async def ai_chat(req: ChatRequest, _=Depends(require_api_key)):
+    context_doc = None
+    if req.id_usuario:
+        try:
+            db = mongo()
+            context_doc = db[COLL_CONTEXTOS].find_one({"user_id": req.id_usuario})
+        except Exception as e:
+            print(f"[Context] Falha ao buscar contexto para {req.id_usuario}: {e}")
+
+    if context_doc and context_doc.get("text_content"):
+        print(f"[Context] Contexto encontrado para {req.id_usuario} (Tipo: {context_doc.get('context_type')}). Roteando para chat de PDF.")
+        return await handle_pdf_chat_from_context(req, context_doc)
+    print(f"[Context] Contexto não encontrado para {req.id_usuario}. Roteando para chat geral.")
+    
     out = await chat_with_tools(
         user_msg=req.pergunta, 
         history=req.history, 
@@ -1252,10 +1375,39 @@ async def ai_chat_with_pdf(
     1. IA (Ferramenta) detecta a INTENÇÃO de "enigma".
     2. Python (extract_hidden_message) faz a EXTRAÇÃO LÓGICA (bruta).
     3. IA (2ª chamada) "limpa" o resultado do Python (acentos, espaços).
+    
+    MODIFICADO: Agora também salva o 'raw_pdf_text' no COLL_CONTEXTOS
+    para persistência da sessão.
     """
     try:
         pdf_bytes = await file.read()
         raw_pdf_text = extract_full_pdf_text(pdf_bytes)
+        
+        data_hoje, (inicio_mes, fim_mes) = iso_date(today()), month_bounds(today())
+        nome_usuario_fmt = nome_usuario or "você"
+        email_usuario_fmt = email_usuario or "email.desconhecido"
+        id_usuario_fmt = id_usuario
+        if not id_usuario_fmt:
+            id_usuario_fmt = "id.desconhecido.pdf" # Fallback
+            print("[Context] ATENÇÃO: id_usuario não fornecido para /ai/chat-with-pdf. A memória não funcionará corretamente.")
+
+        try:
+            db = mongo()
+            db[COLL_CONTEXTOS].update_one(
+                {"user_id": id_usuario_fmt},
+                {"$set": {
+                    "user_id": id_usuario_fmt,
+                    "context_type": "pdf",
+                    "text_content": raw_pdf_text, # Salva o texto bruto (bom para enigma)
+                    "filename": file.filename,
+                    "updated_at": today()
+                }},
+                upsert=True
+            )
+            print(f"[Context] Contexto PDF salvo para {id_usuario_fmt} (Arquivo: {file.filename}).")
+        except Exception as e:
+            print(f"[Context] FALHA ao salvar contexto PDF para {id_usuario_fmt}: {e}")
+
         pdf_tools_list = [
             FunctionDeclaration(
                 name="solve_pdf_enigma",
@@ -1275,12 +1427,7 @@ async def ai_chat_with_pdf(
 
         PERGUNTA DO USUÁRIO: {pergunta}
         """
-        
-        data_hoje, (inicio_mes, fim_mes) = iso_date(today()), month_bounds(today())
-        nome_usuario_fmt = nome_usuario or "você"
-        email_usuario_fmt = email_usuario or "email.desconhecido"
-        id_usuario_fmt = id_usuario or "id.desconhecido"
-        
+                
         system_prompt_filled = SYSTEM_PROMPT.format(
             nome_usuario=nome_usuario_fmt, email_usuario=email_usuario_fmt, id_usuario=id_usuario_fmt,
             data_hoje=data_hoje, inicio_mes=inicio_mes, fim_mes=fim_mes,
@@ -1400,7 +1547,7 @@ async def ai_chat_with_pdf(
 
     except Exception as e:
         raise e
-
+    
 @app.post("/ai/chat-with-xlsx")
 async def ai_chat_with_xlsx(
     pergunta: str = Form(...),
@@ -1416,11 +1563,21 @@ async def ai_chat_with_xlsx(
     1. Recebe um XLSX e uma pergunta.
     2. Identifica a intenção: "import", "enigma", ou "rag".
     3. Se "import", tenta extrair dados do projeto da pergunta e criar o projeto.
-    4. Se "enigma" ou "rag", identifica a TAREFA e acha o link do PDF.
+    4. Se "enigma" ou "rag", identifica a TAREFA, acha o link do PDF,
+       E SALVA O TEXTO DO PDF NO CONTEXTO.
     """
     try:
         xlsx_bytes = await file.read()
         df = xlsx_bytes_to_dataframe_preserving_hyperlinks(xlsx_bytes)
+        
+        id_usuario_fmt = id_usuario
+        if not id_usuario_fmt:
+            id_usuario_fmt = "id.desconhecido.xlsx" # Fallback
+            print("[Context] ATENÇÃO: id_usuario não fornecido para /ai/chat-with-xlsx. A memória não funcionará corretamente.")
+        
+        nome_usuario_fmt = nome_usuario or "você"
+        email_usuario_fmt = email_usuario or "email.desconhecido"
+        
         if "Nome" not in df.columns or "Documento Referência" not in df.columns:
             pass
         task_names = []
@@ -1429,6 +1586,7 @@ async def ai_chat_with_xlsx(
             task_map_str = "\n".join(f"- {name}" for name in task_names)
         else:
             task_map_str = "(Nenhuma coluna 'Nome' encontrada na planilha)"
+            
         model = init_model("Você é um assistente de roteamento.")
         prompt_identificacao = f"""
         O usuário fez a pergunta: "{pergunta}"
@@ -1451,9 +1609,10 @@ async def ai_chat_with_xlsx(
             intention = route_info.get("intention", "rag")
         except Exception:
             raise HTTPException(status_code=400, detail="Não consegui entender sua intenção (importar, ler, etc.).")
+            
         final_answer = ""
         tool_steps = []
-        nome_usuario_fmt = nome_usuario or "você"
+        
         if intention == "import":
             print(f"[DEBUG-V17] Intenção: IMPORT. Pergunta: {pergunta}")
             extract_prompt = f"""
@@ -1489,7 +1648,7 @@ async def ai_chat_with_xlsx(
                     result = await tasks_from_xlsx_logic(
                         projeto_id=None,
                         projeto_nome=params.get("projeto_nome"),
-                        user_id=id_usuario,
+                        user_id=id_usuario, # Passa o id_usuario original
                         create_project_flag=1,
                         projeto_situacao=params.get("projeto_situacao"),
                         projeto_prazo=prazo_fmt,
@@ -1511,10 +1670,12 @@ async def ai_chat_with_xlsx(
                         except Exception: detail = e.response.text
                     final_answer = f"Tentei importar o projeto, mas falhei: {detail}"
                     tool_steps.append({"call": "import_from_file", "args": params, "result": {"error": detail}})    
+        
         elif not task_names:
             raise HTTPException(status_code=400, detail="A intenção não era 'importar', mas a planilha não tem uma coluna 'Nome' para que eu possa ler as tarefas.")
         elif not task_name or task_name not in task_names:
             raise HTTPException(status_code=404, detail=f"Não consegui identificar uma tarefa válida da sua planilha na sua pergunta. A intenção era 'ler' ou 'enigma'?")
+        
         else:
             if "Documento Referência" not in df.columns:
                 raise HTTPException(status_code=400, detail="O XLSX precisa da coluna 'Documento Referência' para RAG/Enigma.")
@@ -1522,19 +1683,50 @@ async def ai_chat_with_xlsx(
             pdf_url = task_row.get("Documento Referência") 
             if not pdf_url or not str(pdf_url).lower().startswith("http"):
                 raise HTTPException(status_code=404, detail=f"A tarefa '{task_name}' não possui um link de PDF válido no arquivo.")
+            
+            print(f"[DEBUG-V17] Intenção: {intention}. PDF: {pdf_url}")
+            try:
+                pdf_content_raw = await get_pdf_content_from_url_impl(pdf_url)
+                if "Erro ao processar PDF" in pdf_content_raw or not pdf_content_raw.strip():
+                    raise ValueError(pdf_content_raw)
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Erro ao ler o PDF da tarefa '{task_name}' (URL: {pdf_url}): {str(e)}")
+
+            try:
+                db = mongo()
+                db[COLL_CONTEXTOS].update_one(
+                    {"user_id": id_usuario_fmt},
+                    {"$set": {
+                        "user_id": id_usuario_fmt,
+                        "context_type": "pdf_from_xlsx",
+                        "text_content": pdf_content_raw, # Salva o texto bruto
+                        "filename": file.filename, # Nome do XLSX original
+                        "source_task_name": task_name,
+                        "source_pdf_url": pdf_url,
+                        "updated_at": today()
+                    }},
+                    upsert=True
+                )
+                print(f"[Context] Contexto XLSX-PDF salvo para {id_usuario_fmt} (Tarefa: {task_name}).")
+            except Exception as e:
+                # Não pare a execução, apenas avise
+                print(f"[Context] FALHA ao salvar contexto XLSX-PDF para {id_usuario_fmt}: {e}")
+            
+            
             if intention == "enigma":
-                print(f"[DEBUG-V17] Intenção: ENIGMA. PDF: {pdf_url}")
-                result = await solve_pdf_enigma_from_url_impl(pdf_url)
+                print(f"[DEBUG-V17] Processando Enigma a partir de texto baixado...")
+                result = extract_hidden_message(pdf_content_raw)
+                if not result:
+                    result = "Nenhuma mensagem secreta encontrada."
+                
                 final_answer = f"A resposta para o enigma no PDF da tarefa '{task_name}' é: {result}"
-                tool_steps.append({"call": "solve_pdf_enigma_from_url", "args": {"url": pdf_url}, "result": result})
+                tool_steps.append({"call": "solve_pdf_enigma_from_text", "args": {"task": task_name}, "result": result})
+            
             else:
-                print(f"[DEBUG-V17] Intenção: RAG. PDF: {pdf_url}")
-                pdf_content_raw = await get_pdf_content_from_url_impl(pdf_url)      
-                if "Erro ao processar PDF" in pdf_content_raw:
-                    raise HTTPException(status_code=500, detail=f"Erro ao ler o PDF da tarefa '{task_name}': {pdf_content_raw}")
+                print(f"[DEBUG-V17] Processando RAG a partir de texto baixado...")
+                                
                 pdf_content = clean_pdf_text(pdf_content_raw)
-                if not pdf_content:
-                    raise HTTPException(status_code=500, detail=f"Consegui baixar o PDF da tarefa '{task_name}', mas não extraí texto dele.")
+                
                 rag_prompt = f"""
                 Use o CONTEÚDO DO DOCUMENTO abaixo (referente à tarefa '{task_name}') para responder a PERGUNTA DO USUÁRIO.
                 ==================== CONTEÚDO DO DOCUMENTO ====================
@@ -1564,7 +1756,7 @@ async def ai_chat_with_xlsx(
         })
     except Exception as e:
         raise e
-
+    
 @app.post("/pdf/extract-text")
 async def pdf_extract_text(file: UploadFile = File(...), _ = Depends(require_api_key)):
     """
@@ -1584,6 +1776,40 @@ async def pdf_solve_enigma(file: UploadFile = File(...), _ = Depends(require_api
     text = extract_full_pdf_text(pdf_bytes) 
     message = extract_hidden_message(text)
     return {"filename": file.filename, "message": message or "Nenhuma mensagem encontrada."}
+
+@app.post("/ai/clear-context")
+async def clear_chat_context(
+    req: ChatRequest,
+    _ = Depends(require_api_key)
+):
+    """
+    Limpa o contexto de arquivo (PDF/XLSX) da memória do usuário.
+    O Frontend DEVE chamar isso no logout.
+    """
+    if not req.id_usuario:
+        raise HTTPException(status_code=400, detail="id_usuario é obrigatório.")
+    
+    id_usuario_fmt = req.id_usuario
+    nome_usuario_fmt = req.nome_usuario or "você"
+    
+    try:
+        db = mongo()
+        result = db[COLL_CONTEXTOS].delete_one({"user_id": id_usuario_fmt})
+        
+        if result.deleted_count > 0:
+            print(f"[Context] Contexto limpo para {id_usuario_fmt}.")
+            msg = "Prontinho! Esqueci o arquivo que estávamos analisando. Sobre o que vamos falar agora?"
+        else:
+            print(f"[Context] Nenhuma contexto para limpar para {id_usuario_fmt}.")
+            msg = "Eu não tinha nenhum arquivo na memória, mas estou pronto para o que precisar!"
+        
+        return JSONResponse({
+            "tipo_resposta": "TEXTO",
+            "conteudo_texto": _normalize_answer(msg, nome_usuario_fmt),
+            "dados": [{"deleted": result.deleted_count}]
+        })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao limpar contexto: {str(e)}")
 
 @app.get("/")
 def root():
