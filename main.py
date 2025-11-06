@@ -537,12 +537,27 @@ async def resolve_responsavel_id(
     pessoas = await list_funcionarios(client)
     key = nome_ou_email.lower()
     if len(key) == 24 and all(c in '0123456789abcdef' for c in key):
-        if any(p.get("_id") == key for p in pessoas): return key
+        if any(p.get("_id") == key for p in pessoas): 
+            return key
+    perfect_match = None
     for p in pessoas:
-        if str(p.get("email") or "").lower() == key: return p.get("_id")
+        if str(p.get("email") or "").lower() == key:
+            return p.get("_id")
+        nome_clean = str(p.get('nome') or '').strip().lower()
+        sobrenome_clean = str(p.get('sobrenome') or '').strip().lower()
+        parts = [nome_clean, sobrenome_clean]
+        full = " ".join(part for part in parts if part) 
+        if full == key:
+            perfect_match = p.get("_id")
+    if perfect_match:
+        return perfect_match
     for p in pessoas:
-        full = f"{str(p.get('nome') or '').lower()} {str(p.get('sobrenome') or '').lower()}".strip()
-        if full == key or str(p.get('nome') or '').lower() == key: return p.get("_id")
+        nome_clean = str(p.get('nome') or '').strip().lower()
+        sobrenome_clean = str(p.get('sobrenome') or '').strip().lower()
+        if nome_clean == key:
+            return p.get("_id")
+        if sobrenome_clean == key:
+            return p.get("_id")         
     return fallback_id
 
 def duration_to_date(duracao: Optional[str]) -> str:
