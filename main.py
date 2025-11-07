@@ -51,6 +51,13 @@ class ChatRequest(BaseModel):
     email_usuario: Optional[str] = None
     id_usuario: Optional[str] = None
 
+class ChatWithPdfUrlRequest(BaseModel):
+    pergunta: str
+    pdf_url: str = Field(..., description="A URL completa para o arquivo PDF (incluindo Google Drive, Sharepoint, etc.)")
+    nome_usuario: Optional[str] = None
+    email_usuario: Optional[str] = None
+    id_usuario: Optional[str] = None
+
 # =========================
 # Config
 # =========================
@@ -728,16 +735,33 @@ REGRA DE OURO: AÇÃO IMEDIATA (NÃO FALE, FAÇA)
 ====================================================================
 Sua missão é executar ferramentas. Esta é sua prioridade número 1.
 VOCÊ ESTÁ ESTRITAMENTE PROIBIDO DE RESPONDER "Sim, claro", "Ok, atualizando..." ou "Pronto!" ANTES de chamar uma ferramenta.
-Se o usuário der uma instrução (como "crie", "altere", "liste", "importe"), sua ÚNICA resposta deve ser a CHAMADA DA FERRAMENTA em segundo plano.
+
+**NOVA REGRA: TRATAMENTO DE LINKS (HTTP/HTTPS)**
+Se a mensagem do usuário contiver uma URL (http:// ou https://) E uma pergunta sobre ela (como 'o que diz este pdf?', 'resuma este link', 'qual o enigma deste arquivo?', 'importe esta planilha'), sua prioridade MÁXIMA é usar uma das ferramentas de URL:
+- `get_pdf_content_from_url` (para ler PDFs)
+- `solve_pdf_enigma_from_url` (para enigmas em PDFs)
+- `get_pdf_content_from_xlsx_url` (para ler PDFs DENTRO de planilhas)
+- `solve_enigma_from_xlsx_url` (para enigmas DENTRO de planilhas)
+- `import_project_from_url` (para importar de XLSX/Google Sheets)
+NÃO RESPONDA que não pode acessar links. As ferramentas fazem isso por você. Chame a ferramenta apropriada IMEDIATAMENTE.
 
 **ERRADO (NUNCA FAÇA ISSO, ISSO É UMA FALHA GRAVE):**
 Usuário: "altere a tarefa X para 'concluída'"
 IA: "Claro! Alterando a tarefa X para 'concluída'."
 
+**ERRADO TAMBÉM (FALHA GRAVE):**
+Usuário: "O que diz este PDF? https://drive.google.com/..."
+IA: "Desculpe, eu não consigo acessar links externos." (ERRADO! Você devia ter chamado `get_pdf_content_from_url`)
+
 **CORRETO (FAÇA ISSO):**
 Usuário: "altere a tarefa X para 'concluída'"
 IA: (Imediatamente chama a ferramenta `update_task(task_name="X", patch={{"status": "concluída"}})`)
 IA: (APÓS a ferramenta retornar 'ok') "Pronto! A tarefa X foi atualizada."
+
+**CORRETO TAMBÉM (FAÇA ISSO):**
+Usuário: "O que diz este PDF? https://drive.google.com/..."
+IA: (Imediatamente chama a ferramenta `get_pdf_content_from_url(url="https://drive.google.com/...")`)
+IA: (APÓS a ferramenta retornar o texto) "O PDF fala sobre..."
 
 Somente após a execução da ferramenta você pode dar uma resposta amigável.
 ====================================================================
@@ -1735,7 +1759,204 @@ async def ai_chat_with_pdf(
 
     except Exception as e:
         raise e
+
+@app.post("/ai/chat-with-pdf-url")
+async def ai_chat_with_pdf_url(
+    req: ChatWithPdfUrlRequest,
+    _ = Depends(require_api_key)
+):
+    """
+    Endpoint de chat (V15 - Lógica Híbrida + Limpeza de IA) - VERSÃO URL
     
+    Funciona exatamente como /ai/chat-with-pdf, mas baixa o PDF de uma URL
+    usando a robusta função fetch_pdf_bytes().
+    """
+    try:
+        print(f"[DEBUG-URL] Baixando PDF de: {req.pdf_url}")
+        pdf_bytes = fetch_pdf_bytes(req.pdf_url)
+        raw_pdf_text = extract_full_pdf_text(pdf_bytes)
+        
+        parsed_url = urlparse(req.pdf_url)
+        filename_from_url = parsed_url.path.split('/')[-1] or "arquivo_da_url.pdf"
+        
+        data_hoje, (inicio_mes, fim_mes) = iso_date(today()), month_bounds(today())
+        nome_usuario_fmt = req.nome_usuario or "você"
+        email_usuario_fmt = req.email_usuario or "email.desconhecido"
+        id_usuario_fmt = req.id_usuario
+        
+        if not id_usuario_fmt:
+            id_usuario_fmt = "id.desconhecido.pdf-url"
+            print("[Context] ATENÇÃO: id_usuario não fornecido para /ai/chat-with-pdf-url. A memória não funcionará corretamente.")
+
+        try:
+            db = mongo()
+            db[COLL_CONTEXTOS].update_one(
+                {"user_id": id_usuario_fmt},
+                {"$set": {
+                    "user_id": id_usuario_fmt,
+                    "context_type": "pdf",
+                    "text_content": raw_pdf_text,
+                    "filename": filename_from_url,
+                    "source_url": req.pdf_url,
+                    "updated_at": today()
+                }},
+                upsert=True
+            )
+            print(f"[Context] Contexto PDF (de URL) salvo para {id_usuario_fmt} (Arquivo: {filename_from_url}).")
+        except Exception as e:
+            print(f"[Context] FALHA ao salvar contexto PDF (de URL) para {id_usuario_fmt}: {e}")
+        
+        pergunta_para_rag = re.sub(
+            r"https?:\/\/[^\s]+", 
+            "(o documento fornecido no contexto)", 
+            req.pergunta, 
+            flags=re.IGNORECASE
+        ).strip()
+        
+        print(f"[DEBUG-URL-CLEAN] Pergunta Original: '{req.pergunta}'")
+        print(f"[DEBUG-URL-CLEAN] Pergunta para RAG: '{pergunta_para_rag}'")
+
+        pdf_tools_list = [
+            FunctionDeclaration(
+                name="solve_pdf_enigma",
+                description="""CHAMADA OBRIGATÓRIA. Use esta ferramenta se a pergunta do usuário contiver QUALQUER palavra relacionada a: 'enigma', 'frase secreta', 'código secreto', 'mensagem escondida', 'frase escondida', 'código', 'decifrar', 'encontrar a frase'. Não use RAG se essas palavras estiverem presentes.""",
+                parameters={"type": "object", "properties": {}}
+            )
+        ]
+        pdf_tool = Tool(function_declarations=pdf_tools_list)
+        rag_text = clean_pdf_text(raw_pdf_text) 
+        contexto_prompt = f"""
+        Você é um assistente. Use o CONTEÚDO DO DOCUMENTO abaixo para responder a PERGUNTA DO USUÁRIO.
+        Responda APENAS com base no CONTEÚDO DO DOCUMENTO.
+
+        ==================== CONTEÚDO DO DOCUMENTO ====================
+        {rag_text[:10000]} 
+        ===============================================================
+
+        PERGUNTA DO USUÁRIO: {pergunta_para_rag}
+        """
+                
+        system_prompt_filled = SYSTEM_PROMPT.format(
+            nome_usuario=nome_usuario_fmt, email_usuario=email_usuario_fmt, id_usuario=id_usuario_fmt,
+            data_hoje=data_hoje, inicio_mes=inicio_mes, fim_mes=fim_mes,
+        )
+        
+        model = init_model(system_prompt_filled)
+        contents = [Content(role="user", parts=[Part.from_text(contexto_prompt)])]
+        
+        resp = model.generate_content(contents, tools=[pdf_tool])
+        
+        if (
+            resp.candidates and resp.candidates[0].content and 
+            resp.candidates[0].content.parts and 
+            getattr(resp.candidates[0].content.parts[0], "function_call", None)
+        ):
+            call = resp.candidates[0].content.parts[0].function_call
+            
+            if call.name == "solve_pdf_enigma":
+                print("[DEBUG-V14-URL] Ferramenta 'solve_pdf_enigma' foi chamada pela IA (via URL).")
+                
+                secret_message_raw = extract_hidden_message(raw_pdf_text)
+                
+                if not secret_message_raw:
+                    print("[DEBUG-V15-URL] Python (V14) não encontrou a frase.")
+                    final_answer = "Analisei o arquivo, mas não encontrei nenhuma frase secreta."
+                    final_answer = _normalize_answer(final_answer, nome_usuario_fmt)
+                    
+                    response_data = {
+                        "tipo_resposta": "TEXTO_PDF",
+                        "conteudo_texto": final_answer,
+                        "dados": [
+                            {
+                                "call": {"name": "solve_pdf_enigma", "args": {}},
+                                "result": {"status": "OK", "raw": secret_message_raw, "cleaned": None}
+                            }
+                        ]
+                    }
+                    return JSONResponse(sanitize_doc(response_data))
+
+
+                print(f"[DEBUG-V15-URL] Python (V14) encontrou: {secret_message_raw}")
+                
+                cleanup_prompt = f"""
+                Minha função Python extraiu a seguinte frase secreta literal: "{secret_message_raw}"
+                
+                Sua tarefa é formatar esta frase para que ela se torne legível em português, seguindo regras MUITO ESTRITAS:
+                
+                1.  **Ordem e Letras:** A ordem das letras e as próprias letras NÃO PODEM MUDAR.
+                    (Exemplo: O bloco 'EQ UI PE' deve se tornar 'EQUIPE'. O 'Q' não pode ser inventado. O 'E' inicial não pode virar 'É'.)
+                2.  **Acentuação:** Adicione a acentuação correta onde necessário. (Ex: 'VOCES' -> 'VOCÊS', 'SAO' -> 'SÃO').
+                3.  **Sem Pontuação:** NÃO adicione NENHUMA pontuação (vírgulas, pontos de exclamação, etc.). A saída deve ser "texto liso".
+                4.  **Caixa Alta:** A saída final deve ser TODA EM MAIÚSCULAS.
+                5.  **Palavras Estrangeiras:** PODE HAVER palavras estrangeiras (ex: 'TEAM', 'PROJECT', INNOVATION, etc.), mas mantenha a acentuação e caixa alta conforme as regras acima; se atente ao contexto para descobrir se é uma palavra estrangeira ou brasileira.
+                
+                Frase Bruta: "{secret_message_raw}"
+                Transforme isso em uma frase limpa, em português, toda em maiúsculas, sem pontuação.
+                
+                Exemplo de 'antes' e 'depois':
+                - Antes: "EQ UI PE VO C E S PA SS AR AM"
+                - Depois: "EQUIPE VOCÊS PASSARAM"
+                
+                Responda APENAS com a frase final limpa.
+                """
+                
+                print("[DEBUG-V16-URL] Chamando IA (Gemini) para limpeza ESTRITA (Lógica Inline)...")
+                
+                cleanup_contents = [Content(role="user", parts=[Part.from_text(cleanup_prompt)])]
+                cleanup_resp = model.generate_content(cleanup_contents, tools=[])
+                                
+                final_answer_cleaned = ""
+                if cleanup_resp.candidates and cleanup_resp.candidates[0].content and cleanup_resp.candidates[0].content.parts:
+                    final_answer_cleaned = getattr(cleanup_resp.candidates[0].content.parts[0], "text", "").strip()
+
+                if not final_answer_cleaned or final_answer_cleaned == secret_message_raw:
+                    print("[DEBUG-V15-URL] IA de limpeza (Inline) falhou. Retornando frase bruta.")
+                    final_answer = f"A frase secreta encontrada no arquivo é: {secret_message_raw}"
+                else:
+                    print(f"[DEBUG-V15-URL] IA de limpeza (Inline) retornou: {final_answer_cleaned}")
+                    final_answer = f"A frase secreta encontrada no arquivo é: {final_answer_cleaned}"
+
+                final_answer = _normalize_answer(final_answer, nome_usuario_fmt)
+                
+                response_data = {
+                    "tipo_resposta": "TEXTO_PDF",
+                    "conteudo_texto": final_answer,
+                    "dados": [
+                        {
+                            "call": {"name": "solve_pdf_enigma", "args": {}},
+                            "result": {"status": "OK", "raw": secret_message_raw, "cleaned": final_answer_cleaned}
+                        }
+                    ]
+                }
+                return JSONResponse(sanitize_doc(response_data))
+        
+        print("[DEBUG-V14-URL] Ferramenta de enigma não foi chamada. Usando RAG (via URL).")
+        final_text = ""
+        if resp.candidates and resp.candidates[0].content and resp.candidates[0].content.parts:
+            final_text = getattr(resp.candidates[0].content.parts[0], "text", "") or ""
+
+        if not rag_text:
+             final_text = "Desculpe, não consegui ler o texto desse PDF para responder sua pergunta."
+        elif not final_text:
+             final_text = "Desculpe, não consegui processar sua solicitação sobre o PDF."
+
+        final_answer = _normalize_answer(final_text, nome_usuario_fmt)
+        
+        response_data = {
+            "tipo_resposta": "TEXTO_PDF",
+            "conteudo_texto": final_answer,
+            "dados": [
+                {
+                    "call": {"name": "RAG_simples", "args": {"pergunta": req.pergunta}},
+                    "result": {"status": "OK", "answer": final_answer}
+                }
+            ]
+        }
+        return JSONResponse(sanitize_doc(response_data))
+
+    except Exception as e:
+        raise e
+
 @app.post("/ai/chat-with-xlsx")
 async def ai_chat_with_xlsx(
     pergunta: str = Form(...),
