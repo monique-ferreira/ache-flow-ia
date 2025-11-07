@@ -58,6 +58,12 @@ class ChatWithPdfUrlRequest(BaseModel):
     email_usuario: Optional[str] = None
     id_usuario: Optional[str] = None
 
+class TitleRequest(BaseModel):
+    first_message: str = Field(..., description="A primeira mensagem do usuário em uma conversa.")
+
+class TitleResponse(BaseModel):
+    title: str
+
 # =========================
 # Config
 # =========================
@@ -2784,6 +2790,44 @@ async def clear_chat_context(
         })
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao limpar contexto: {str(e)}")
+
+@app.post("/ai/generate-title", response_model=TitleResponse)
+async def ai_generate_title(req: TitleRequest, _=Depends(require_api_key)):
+    """
+    Gera um título curto para uma conversa de chat com base na primeira mensagem.
+    """
+    
+    system_prompt_title = """
+    Sua única tarefa é gerar um título curto e conciso (máximo 5 palavras) 
+    para uma conversa de chat. O título deve ser baseado na primeira 
+    pergunta do usuário, que será fornecida.
+
+    Responda APENAS com o título gerado, em português.
+    
+    Exemplos:
+    - Usuário: "quantos projetos estão em andamento?" -> "Projetos em Andamento"
+    - Usuário: "me ajude a criar um projeto de onboarding" -> "Criação de Projeto Onboarding"
+    - Usuário: "qual o enigma do pdf?" -> "Enigma do PDF"
+    """
+    
+    user_prompt_for_model = f"Gere um título para uma conversa que começa com: \"{req.first_message}\""
+
+    try:
+        model = init_model(system_prompt_title)
+        contents = [Content(role="user", parts=[Part.from_text(user_prompt_for_model)])]
+        
+        resp = model.generate_content(contents, tools=[])
+        
+        title_text = "Chat" # Fallback
+        if resp.candidates and resp.candidates[0].content and resp.candidates[0].content.parts:
+            title_text = getattr(resp.candidates[0].content.parts[0], "text", "Chat").strip()
+            
+        title_text = title_text.replace('"', '').replace("'", "")
+
+        return TitleResponse(title=title_text)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao gerar título: {str(e)}")
 
 @app.get("/")
 def root():
