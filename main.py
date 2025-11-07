@@ -876,6 +876,13 @@ def count_all_projects() -> int:
         print(f"Erro ao contar projetos: {e}")
         return -1
 
+def count_all_tasks() -> int:
+    try:
+        return mongo()[COLL_TAREFAS].count_documents({})
+    except Exception as e:
+        print(f"Erro ao contar tarefas: {e}")
+        return -1
+
 def count_projects_by_status(status: str) -> int:
     status_norm = (status or "").strip()
     if not status_norm: return 0
@@ -1146,6 +1153,7 @@ async def solve_enigma_from_xlsx_url_impl(url: str) -> str:
 def toolset() -> Tool:
     fns = [
         FunctionDeclaration(name="count_all_projects", description="Conta e retorna o número total de projetos.", parameters={"type": "object", "properties": {}}),
+        FunctionDeclaration(name="count_all_tasks", description="Conta e retorna o número total de tarefas.", parameters={"type": "object", "properties": {}}),
         FunctionDeclaration(name="count_projects_by_status", description="Conta e retorna o número de projetos por status (ex: 'em andamento').", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
         FunctionDeclaration(name="list_all_projects", description="Lista todos os projetos.", parameters={"type": "object", "properties": {}}),
         FunctionDeclaration(name="list_all_tasks", description="Lista todas as tarefas.", parameters={"type": "object", "properties": {}}),
@@ -1185,6 +1193,7 @@ def toolset() -> Tool:
 async def exec_tool(name: str, args: Dict[str, Any], user_id: Optional[str] = None) -> Dict[str, Any]:
     try:
         if name == "count_all_projects": return {"ok": True, "data": count_all_projects()}
+        if name == "count_all_tasks": return {"ok": True, "data": count_all_tasks()}
         if name == "count_projects_by_status": return {"ok": True, "data": count_projects_by_status(args["status"])}
         if name == "list_all_projects": return {"ok": True, "data": list_all_projects(args.get("top_k", 500))}
         if name == "list_all_tasks": return {"ok": True, "data": list_all_tasks(args.get("top_k", 2000))}
