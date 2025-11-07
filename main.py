@@ -545,11 +545,46 @@ async def create_project_api(client: httpx.AsyncClient, data: Dict[str, Any]) ->
 async def create_task_api(client: httpx.AsyncClient, data: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{TASKS_API_BASE}{TASKS_API_TASKS_PATH}"
     auth_headers = await get_api_auth_headers(client, use_json=True)
+    descricao_raw = data.get("descricao")
+    doc_ref_raw = data.get("documento_referencia")
+    descricao_final = descricao_raw 
+    if (descricao_raw and 
+        "Texto." in descricao_raw and 
+        doc_ref_raw and 
+        "http" in doc_ref_raw):
+        print(f"[create_task_api] LOG 1: Tentativa de RAG detectada. Desc: '{descricao_raw}', Doc: '{doc_ref_raw}'")
+        try:
+            print(f"[create_task_api] LOG 2: Baixando PDF de '{doc_ref_raw}'...")
+            pdf_bytes = fetch_pdf_bytes(doc_ref_raw)
+            print(f"[create_task_api] LOG 3: PDF baixado ({len(pdf_bytes)} bytes). Extraindo texto...")
+            full_pdf_text = extract_full_pdf_text(pdf_bytes)
+            if full_pdf_text.strip():
+                print(f"[create_task_api] LOG 4: Texto extraído. Amostra: '{full_pdf_text.strip()[:50]}...'")
+                def _repl(m: re.Match) -> str:
+                    full_token, anchor = m.group(1), m.group(2)
+                    print(f"[create_task_api] LOG 5: Buscando âncora '{anchor}' no PDF...")
+                    extracted = clean_pdf_text(extract_after_anchor_from_pdf(full_pdf_text, anchor))
+                    if extracted:
+                        print(f"[create_task_api] LOG 6: Âncora '{anchor}' encontrada. Texto: '{extracted[:50]}...'")
+                        return extracted
+                    else:
+                        print(f"[create_task_api] LOG 6-ERRO: Âncora '{anchor}' NÃO encontrada no PDF.")
+                        return full_token
+                nova_descricao = re.sub(r"(?i)\b((?:Doc\.?\s*)?(Texto\.?\d+))\b\.?", _repl, descricao_raw)
+                descricao_final = nova_descricao
+            else:
+                 print(f"[create_task_api] LOG 4-ERRO: PDF baixado de {doc_ref_raw} não retornou texto. Usando descrição original.")
+        except Exception as e:
+            print(f"[create_task_api] LOG X-FALHA: FALHA ao tentar resolver PDF: {e}")
+    data["descricao"] = descricao_final
     payload = pick(data, ["nome", "projeto_id", "responsavel_id", "descricao", "prioridade", "status", "prazo", "documento_referencia", "concluido"])
     payload = {k: v for k, v in payload.items() if v is not None}
+    print(f"[create_task_api] LOG 7: Enviando payload final para o Render: {payload}")
     r = await client.post(url, json=payload, headers=auth_headers, timeout=TIMEOUT_S)
     if r.status_code not in (200, 201):
+        print(f"[create_task_api] LOG 8-ERRO: API do Render rejeitou o payload. Status: {r.status_code}, Resposta: {r.text}")
         raise httpx.HTTPStatusError(f"Erro da API do Render: {r.status_code}", request=r.request, response=r)
+    print(f"[create_task_api] LOG 9: Tarefa criada com sucesso no Render.")
     return sanitize_doc(r.json())
 
 async def find_project_id_by_name(client: httpx.AsyncClient, projeto_nome: str) -> Optional[str]:
@@ -2828,6 +2863,47 @@ async def ai_generate_title(req: TitleRequest, _=Depends(require_api_key)):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao gerar título: {str(e)}")
+
+class TaskPayload(BaseModel):
+    nome: str
+    projeto_id: str
+    responsavel_id: str
+    descricao: Optional[str] = None
+    prioridade: Optional[str] = "média"
+    status: str = "não iniciada"
+    prazo: str
+    numero: Optional[str] = None
+    classificacao: Optional[str] = None
+    fase: Optional[str] = None
+    condicao: Optional[str] = None
+    documento_referencia: Optional[str] = None
+    concluido: Optional[bool] = False
+
+@app.post("/tasks/create-with-logic")
+async def create_task_with_logic(
+    payload: TaskPayload,
+    _ = Depends(require_api_key)
+):
+    """
+    NOVO ENDPOINT: Cria uma tarefa única, mas aplica a lógica 
+    de substituição de PDF antes de salvá-la no Render.
+    """
+    try:
+        data_dict = payload.dict() 
+
+        async with httpx.AsyncClient() as client:
+            result = await create_task_api(client, data_dict) 
+            return result
+
+    except Exception as e:
+        detail = str(e)
+        if isinstance(e, httpx.HTTPStatusError):
+            try: 
+                err_json = e.response.json()
+                detail = err_json.get("detail", err_json.get("erro", str(e)))
+            except Exception: 
+                detail = e.response.text
+        raise HTTPException(status_code=422, detail=detail)
 
 @app.get("/")
 def root():
