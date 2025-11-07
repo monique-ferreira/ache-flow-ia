@@ -1,5 +1,6 @@
 import os, io, re, time, asyncio, json
 from typing import List, Optional, Dict, Any, Tuple
+from collections.abc import Mapping
 from urllib.parse import urlparse, parse_qs, unquote, quote, urljoin
 from datetime import datetime, timedelta, date
 
@@ -170,7 +171,10 @@ def sanitize_doc(data: Any) -> Any:
         return str(data)
     if isinstance(data, DBRef):
         return str(data.id)
-    if isinstance(data, dict):
+    data_type_name = data.__class__.__name__
+    if isinstance(data, (Mapping, dict)) or data_type_name == 'MapComposite':
+        if len(data) == 1 and (list(data.keys())[0].startswith('$') or list(data.keys())[0] == '_id'):
+            return sanitize_doc(list(data.values())[0])
         return {k: sanitize_doc(v) for k, v in data.items()}
     if isinstance(data, list):
         return [sanitize_doc(item) for item in data]
@@ -234,6 +238,38 @@ def _enrich_doc_with_responsavel(doc: Dict[str, Any], employee_map: Dict[str, st
         del doc[resp_id_key]
         
     return doc
+
+def _find_task_id_by_name_sync(task_name: str, project_name: str) -> Optional[str]:
+    """
+    Helper interno para encontrar o _id de uma tarefa com base no nome
+    e no nome do projeto (para desambiguação).
+    """
+    project_name_norm = (project_name or "").strip()
+    task_name_norm = (task_name or "").strip()
+    if not project_name_norm or not task_name_norm:
+        return None
+    try:
+        # 1. Encontrar o Projeto
+        rx_proj = {"$regex": f"^{re.escape(project_name_norm)}$", "$options": "i"}
+        proj = mongo()[COLL_PROJETOS].find_one({"nome": rx_proj}, {"_id": 1})
+        if not proj: 
+            print(f"[Helper] Projeto '{project_name_norm}' não encontrado.")
+            return None
+        project_id = proj.get("_id")
+        
+        # 2. Encontrar a Tarefa dentro do Projeto
+        rx_task = {"$regex": f"^{re.escape(task_name_norm)}", "$options": "i"}
+        task_query = {"nome": rx_task, "projeto": DBRef(collection=COLL_PROJETOS, id=project_id)}
+        task = mongo()[COLL_TAREFAS].find_one(task_query, {"_id": 1})
+        
+        if task:
+            return str(task.get("_id"))
+        else:
+            print(f"[Helper] Tarefa '{task_name_norm}' não encontrada no projeto '{project_name_norm}'.")
+            return None
+    except Exception as e:
+        print(f"Erro ao buscar task ID por nome: {e}")
+        return None
 
 # =========================
 # Helpers de Download (PDF/XLSX)
@@ -491,7 +527,7 @@ async def create_project_api(client: httpx.AsyncClient, data: Dict[str, Any]) ->
     r = await client.post(url, json=payload, headers=auth_headers, timeout=TIMEOUT_S)
     if r.status_code not in (200, 201):
         raise httpx.HTTPStatusError(f"Erro da API do Render: {r.status_code}", request=r.request, response=r)
-    return r.json()
+    return sanitize_doc(r.json())
 
 async def create_task_api(client: httpx.AsyncClient, data: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{TASKS_API_BASE}{TASKS_API_TASKS_PATH}"
@@ -501,7 +537,7 @@ async def create_task_api(client: httpx.AsyncClient, data: Dict[str, Any]) -> Di
     r = await client.post(url, json=payload, headers=auth_headers, timeout=TIMEOUT_S)
     if r.status_code not in (200, 201):
         raise httpx.HTTPStatusError(f"Erro da API do Render: {r.status_code}", request=r.request, response=r)
-    return r.json()
+    return sanitize_doc(r.json())
 
 async def find_project_id_by_name(client: httpx.AsyncClient, projeto_nome: str) -> Optional[str]:
     url = f"{TASKS_API_BASE}{TASKS_API_PROJECTS_PATH}"
@@ -687,6 +723,24 @@ async def tasks_from_xlsx_logic(
 # =========================
 
 SYSTEM_PROMPT = """
+====================================================================
+REGRA DE OURO: AÇÃO IMEDIATA (NÃO FALE, FAÇA)
+====================================================================
+Sua missão é executar ferramentas. Esta é sua prioridade número 1.
+VOCÊ ESTÁ ESTRITAMENTE PROIBIDO DE RESPONDER "Sim, claro", "Ok, atualizando..." ou "Pronto!" ANTES de chamar uma ferramenta.
+Se o usuário der uma instrução (como "crie", "altere", "liste", "importe"), sua ÚNICA resposta deve ser a CHAMADA DA FERRAMENTA em segundo plano.
+
+**ERRADO (NUNCA FAÇA ISSO, ISSO É UMA FALHA GRAVE):**
+Usuário: "altere a tarefa X para 'concluída'"
+IA: "Claro! Alterando a tarefa X para 'concluída'."
+
+**CORRETO (FAÇA ISSO):**
+Usuário: "altere a tarefa X para 'concluída'"
+IA: (Imediatamente chama a ferramenta `update_task(task_name="X", patch={{"status": "concluída"}})`)
+IA: (APÓS a ferramenta retornar 'ok') "Pronto! A tarefa X foi atualizada."
+
+Somente após a execução da ferramenta você pode dar uma resposta amigável.
+====================================================================
 Você é o "Ache", um assistente de produtividade virtual da plataforma Ache Flow.
 Sua missão é ajudar colaboradores(as) como {nome_usuario} (email: {email_usuario}, id: {id_usuario}) a entender e gerenciar tarefas, projetos e prazos.
 ====================================================================
@@ -831,7 +885,7 @@ async def update_project(
         if not payload: raise ValueError("Nenhum campo válido para atualizar ('patch' vazio).")
         url = f"{TASKS_API_BASE}/projetos/{resolved_pid}" 
         resp = await client.put(url, json=payload, headers=auth_headers)
-        resp.raise_for_status(); return resp.json()
+        resp.raise_for_status(); return sanitize_doc(resp.json())
 
 async def create_project(doc: Dict[str, Any], user_id: Optional[str] = None) -> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
@@ -851,16 +905,45 @@ async def create_task(doc: Dict[str, Any]) -> Dict[str, Any]:
         if not data.get("nome"): raise ValueError("nome é obrigatório")
         return await create_task_api(client, data)
 
-async def update_task(tid: str, patch: Dict[str, Any]) -> Dict[str, Any]:
+async def update_task(
+    patch: Dict[str, Any],
+    task_id: Optional[str] = None, 
+    task_name: Optional[str] = None,
+    project_name: Optional[str] = None,
+    user_id: Optional[str] = None
+) -> Dict[str, Any]:
+    
     async with httpx.AsyncClient() as client:
-        auth_headers = await get_api_auth_headers(client, use_json=True)
-        allowed = {"nome", "descricao", "prioridade", "status", "prazo", "responsavel_id", "projeto_id"}
-        payload = {k: v for k, v in patch.items() if k in allowed and v is not None}
-        if not payload: raise ValueError("patch vazio")
-        url = f"{TASKS_API_BASE}/tarefas/{tid}" 
-        resp = await client.put(url, json=payload, headers=auth_headers)
-        resp.raise_for_status(); return resp.json()
+        resolved_tid = task_id
+        
+        if not resolved_tid and task_name and project_name:
+            print(f"[update_task] ID não fornecido. Buscando por nome: '{task_name}' em '{project_name}'...")
+            resolved_tid = _find_task_id_by_name_sync(task_name, project_name)
+        
+        if not resolved_tid:
+            raise ValueError(f"Tarefa '{task_name or task_id}' não encontrada. Forneça um ID de tarefa válido ou o nome exato da tarefa E do projeto.")
 
+        auth_headers = await get_api_auth_headers(client, use_json=True)
+        
+        allowed = {"nome", "descricao", "prioridade", "status", "prazo", "projeto_id"}
+        payload = {k: v for k, v in patch.items() if k in allowed and v is not None}
+        
+        if "prazo" in patch and patch["prazo"]:
+            payload["prazo"] = _parse_date_robust(patch["prazo"])
+
+        if "responsavel" in patch and patch["responsavel"]:
+            resp_id = await resolve_responsavel_id(client, patch["responsavel"], default_user_id=user_id)
+            payload["responsavel_id"] = resp_id
+        elif "responsavel_id" in patch and patch["responsavel_id"]:
+             payload["responsavel_id"] = patch["responsavel_id"]
+        
+        if not payload: 
+            raise ValueError("patch vazio")
+            
+        url = f"{TASKS_API_BASE}/tarefas/{resolved_tid}"
+        resp = await client.put(url, json=payload, headers=auth_headers)
+        resp.raise_for_status(); return sanitize_doc(resp.json())
+        
 def list_tasks_by_status(status: str, top_k: int = 50) -> List[Dict[str, Any]]:
     status_norm = (status or "").strip()
     if not status_norm: return []
@@ -1048,10 +1131,10 @@ def toolset() -> Tool:
         FunctionDeclaration(name="list_projects_by_status", description="Lista projetos por status (ex: 'em andamento').", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
         FunctionDeclaration(name="count_my_projects", description="Conta quantos projetos são de responsabilidade do usuário ATUAL.", parameters={"type": "object", "properties": {}}),
         FunctionDeclaration(name="list_my_projects", description="Lista os projetos de responsabilidade do usuário ATUAL.", parameters={"type": "object", "properties": {}}),
-        FunctionDeclaration(name="update_project", description="Atualiza campos de um projeto.", parameters={"type": "object", "properties": {"project_id": {"type": "string"}, "patch": {"type": "object", "properties": {"nome": {"type": "string"}, "situacao": {"type": "string"}, "prazo": {"type": "string"}}}}, "required": ["project_id", "patch"]}),        
+        FunctionDeclaration(name="update_project", description="Atualiza campos de um projeto. Identifique o projeto usando 'project_id' (preferencial) OU 'project_name'.", parameters={"type": "object", "properties": {"patch": {"type": "object", "description": "Os campos para atualizar. Ex: {'situacao': 'concluído', 'prazo': '2025-12-31'}", "properties": {"nome": {"type": "string"}, "situacao": {"type": "string"}, "prazo": {"type": "string"}, "responsavel": {"type": "string", "description": "O NOME do novo responsável (ex: 'Ana Luiza Dourado')."}, "descricao": {"type": "string"}, "categoria": {"type": "string"}}}, "project_id": {"type": "string", "description": "O ID do projeto (se você já souber)."}, "project_name": {"type": "string", "description": "O NOME EXATO do projeto (usar se 'project_id' for desconhecido)."}}, "required": ["patch"]}),        
         FunctionDeclaration(name="create_project", description="Cria um novo projeto.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "responsavel": {"type": "string"}, "situacao": {"type": "string"}, "prazo": {"type": "string"}}, "required": ["nome", "responsavel", "situacao", "prazo"]}),
         FunctionDeclaration(name="create_task", description="Cria um nova tarefa.", parameters={"type": "object", "properties": {"nome": {"type": "string"}, "projeto_id": {"type": "string"}, "responsavel_id": {"type": "string"}, "prazo": {"type": "string"}, "status": {"type": "string"}}, "required": ["nome", "projeto_id", "responsavel_id", "prazo", "status"]}),
-        FunctionDeclaration(name="update_task", description="Atualiza campos de uma tarefa.", parameters={"type": "object", "properties": {"task_id": {"type": "string"}, "patch": {"type": "object", "properties": {"nome": {"type": "string"}, "status": {"type": "string"}, "prazo": {"type": "string"}, "responsavel_id": {"type": "string"}}}}, "required": ["task_id", "patch"]}),
+        FunctionDeclaration(name="update_task", description="Atualiza campos de uma tarefa. Você deve identificar a tarefa usando 'task_id' (preferencial) OU usando 'task_name' e 'project_name' juntos.", parameters={ "type": "object", "properties": { "patch": { "type": "object", "description": "Os campos para atualizar. Ex: {'status': 'concluída', 'prazo': '2025-12-31'}", "properties": { "nome": {"type": "string"}, "status": {"type": "string"}, "prazo": {"type": "string"}, "responsavel_id": {"type": "string", "description": "O ID do responsável (se souber)."}, "responsavel": {"type": "string", "description": "O NOME do responsável (ex: 'Ana Luiza Dourado')."}, "descricao": {"type": "string"}, "prioridade": {"type": "string"}, }}, "task_id": {"type": "string", "description": "O ID da tarefa (se você já souber)."}, "task_name": {"type": "string", "description": "O NOME EXATO da tarefa (usar se 'task_id' for desconhecido)."}, "project_name": {"type": "string", "description": "O NOME EXATO do projeto (OBRIGATÓRIO se 'task_name' for usado)."}}, "required": ["patch"]}),        
         FunctionDeclaration(name="import_project_from_url", description="Cria um projeto e importa tarefas a partir de uma URL de arquivo .xlsx ou Google Sheets.", parameters={"type": "object", "properties": {"xlsx_url": {"type": "string"}, "projeto_nome": {"type": "string"}, "projeto_situacao": {"type": "string"}, "projeto_prazo": {"type": "string"}, "projeto_responsavel": {"type": "string"}, "projeto_descricao": {"type": "string"}, "projeto_categoria": {"type": "string"}}, "required": ["xlsx_url", "projeto_nome", "projeto_situacao", "projeto_prazo", "projeto_responsavel"]}),
         FunctionDeclaration(name="list_tasks_by_status", description="Lista tarefas com base em um status exato (ex: 'não iniciada', 'concluída').", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
         FunctionDeclaration(name="count_tasks_by_status", description="Conta tarefas com base em um status exato (ex: 'não iniciada', 'concluída').", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
@@ -1095,7 +1178,7 @@ async def exec_tool(name: str, args: Dict[str, Any], user_id: Optional[str] = No
         if name == "update_project": return {"ok": True, "data": await update_project(patch=args.get("patch", {}), project_id=args.get("project_id"), project_name=args.get("project_name"), user_id=user_id)}              
         if name == "create_project": return {"ok": True, "data": await create_project(args, user_id=user_id)}
         if name == "create_task": return {"ok": True, "data": await create_task(args)}
-        if name == "update_task": return {"ok": True, "data": await update_task(args["task_id"], args.get("patch", {}))}
+        if name == "update_task": return {"ok": True, "data": await update_task(**args)}               
         if name == "import_project_from_url": return {"ok": True, "data": await import_project_from_url_tool(**args, user_id=user_id)}
         
         if name == "get_pdf_content_from_url": return {"ok": True, "data": await get_pdf_content_from_url_impl(args["url"])}
@@ -1166,12 +1249,15 @@ async def chat_with_tools(user_msg: str, history: Optional[List[HistoryMessage]]
             contents.append(model_response_content) 
             
         for fc in calls:
-            name, args = fc.name, {k: v for k, v in (fc.args or {}).items()}
+            name = fc.name
+            args = sanitize_doc(dict(fc.args or {}))
             if name in ("list_projects_by_deadline_range", "list_tasks_by_deadline_range") and (not args.get("start") or not args.get("end")):
                 args["start"], args["end"] = inicio_mes, fim_mes
             result = await exec_tool(name, args, id_usuario)
-            tool_steps.append({"call": {"name": name, "args": args}, "result": result})            
-            contents.append(Content(role="tool", parts=[Part.from_function_response(name=name, response=result)]))
+            safe_result_for_log = sanitize_doc(result)
+            safe_result_for_model = safe_result_for_log
+            tool_steps.append({"call": {"name": name, "args": args}, "result": safe_result_for_log})
+            contents.append(Content(role="tool", parts=[Part.from_function_response(name=name, response=safe_result_for_model)]))
             
     return {"answer": _normalize_answer("Concluí as ações solicitadas.", nome_usuario), "tool_steps": tool_steps}
 
@@ -1320,7 +1406,7 @@ async def handle_file_chat_from_context(req: ChatRequest, context_doc: Dict[str,
 
         elif function_call and function_call.name == "import_project_from_context":
             print(f"[Context-V19] Intenção: IMPORTAR (do contexto). UserID: {id_usuario_fmt}")
-            tool_steps.append({"call": "import_project_from_context", "args": function_call.args, "result": None})
+            tool_steps.append({"call": "import_project_from_context", "args": sanitize_doc(dict(function_call.args or {})), "result": None})
             
             try:
                 params = function_call.args
@@ -1371,11 +1457,13 @@ async def handle_file_chat_from_context(req: ChatRequest, context_doc: Dict[str,
             tool_steps.append({"call": "RAG_on_Context", "args": {"pergunta": pergunta}, "result": final_answer})
 
         final_answer_fmt = _normalize_answer(final_answer, nome_usuario_fmt)
-        return JSONResponse({
+        response_data = {
             "tipo_resposta": "TEXTO_CONTEXTO",
             "conteudo_texto": final_answer_fmt,
-            "dados": tool_steps
-        })
+            "dados": tool_steps,
+        }
+        return JSONResponse(sanitize_doc(response_data))
+
 
     except Exception as e:
         detail = str(e)
@@ -1413,7 +1501,7 @@ async def ai_chat(req: ChatRequest, _=Depends(require_api_key)):
         "conteudo_texto": out.get("answer", "Desculpe, não consegui processar sua solicitação."),
         "dados": out.get("tool_steps")
     }
-    return JSONResponse(response_data)
+    return JSONResponse(sanitize_doc(response_data))
 
 @app.post("/tasks/from-xlsx")
 async def tasks_from_xlsx(
@@ -1560,11 +1648,12 @@ async def ai_chat_with_pdf(
                         "dados": [
                             {
                                 "call": {"name": "solve_pdf_enigma", "args": {}},
-                                "result": {"status": "NOT_FOUND", "answer": final_answer}
+                                "result": {"status": "OK", "raw": secret_message_raw, "cleaned": final_answer_cleaned}
                             }
                         ]
                     }
-                    return JSONResponse(response_data)
+                    return JSONResponse(sanitize_doc(response_data))
+
 
                 print(f"[DEBUG-V15] Python (V14) encontrou: {secret_message_raw}")
                 
@@ -1618,7 +1707,7 @@ async def ai_chat_with_pdf(
                         }
                     ]
                 }
-                return JSONResponse(response_data)
+                return JSONResponse(sanitize_doc(response_data))
         
         print("[DEBUG-V14] Ferramenta de enigma não foi chamada. Usando RAG.")
         final_text = ""
@@ -1635,14 +1724,14 @@ async def ai_chat_with_pdf(
         response_data = {
             "tipo_resposta": "TEXTO_PDF",
             "conteudo_texto": final_answer,
-            "dados": [ # Formato que o frontend espera
+            "dados": [
                 {
                     "call": {"name": "RAG_simples", "args": {"pergunta": pergunta}},
                     "result": {"status": "OK", "answer": final_answer}
                 }
             ]
         }
-        return JSONResponse(response_data)
+        return JSONResponse(sanitize_doc(response_data))
 
     except Exception as e:
         raise e
@@ -1944,11 +2033,13 @@ async def ai_chat_with_xlsx(
                     final_answer = "Não encontrei a resposta no documento."
                 tool_steps.append({"call": "RAG_on_XLSX_PDF", "args": {"url": pdf_url, "pergunta": pergunta}, "result": final_answer})
         final_answer_fmt = _normalize_answer(final_answer, nome_usuario_fmt)
-        return JSONResponse({
+        response_data = {
             "tipo_resposta": "TEXTO_XLSX",
             "conteudo_texto": final_answer_fmt,
-            "dados": tool_steps
-        })
+            "dados": tool_steps,
+        }
+        return JSONResponse(sanitize_doc(response_data))
+
     except Exception as e:
         raise e
             
