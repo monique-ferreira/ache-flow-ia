@@ -883,6 +883,254 @@ def count_all_tasks() -> int:
         print(f"Erro ao contar tarefas: {e}")
         return -1
 
+def find_employee_with_most_tasks() -> Dict[str, Any]:
+    """
+    Usa um pipeline de agregação do MongoDB para encontrar o funcionário
+    com o maior número de tarefas atribuídas. (Versão 2 - Robusta)
+    """
+    try:
+        pipeline = [
+            {"$match": {"responsavel": {"$exists": True, "$ne": None, "$ne": ""}}},
+            
+            {"$group": {"_id": "$responsavel", "count": {"$sum": 1}}},
+            
+            {"$sort": {"count": -1}},
+            
+            {"$limit": 1},
+            
+            {
+                "$lookup": {
+                    "from": COLL_FUNCIONARIOS,
+                    "localField": "_id",
+                    "foreignField": "_id",
+                    "as": "funcionario_doc"
+                }
+            },
+            
+            {"$unwind": {"path": "$funcionario_doc", "preserveNullAndEmptyArrays": True}},
+            
+            {
+                "$project": {
+                    "_id": 0,
+                    "total_tarefas": "$count",
+                    "nome_funcionario": {
+                        "$trim": {
+                            "input": {
+                                "$concat": [
+                                    {"$ifNull": ["$funcionario_doc.nome", "(Funcionário não encontrado)"]},
+                                    " ",
+                                    {"$ifNull": ["$funcionario_doc.sobrenome", ""]}
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        ]
+        
+        result = list(mongo()[COLL_TAREFAS].aggregate(pipeline))
+        
+        if not result:
+            return {"erro": "Não foi possível encontrar funcionários com tarefas (ou nenhuma tarefa está atribuída)."}
+        return result[0]
+
+    except Exception as e:
+        print(f"Erro ao buscar funcionário com mais tarefas: {e}")
+        return {"erro": str(e)}
+
+def _find_employee_id_by_name_sync(name_or_email: str) -> Optional[ObjectId]:
+    """
+    Helper SÍNCRONO para encontrar o ID de um funcionário no MongoDB
+    pelo nome, sobrenome, nome completo ou email.
+    """
+    key = (name_or_email or "").strip().lower()
+    if not key: return None
+    
+    try:
+        # 1. Tentar por email (correspondência exata, insensível)
+        query_email = {"email": {"$regex": f"^{re.escape(key)}$", "$options": "i"}}
+        emp = mongo()[COLL_FUNCIONARIOS].find_one(query_email, {"_id": 1})
+        if emp: return emp.get("_id")
+
+        # 2. Tentar por ID (se parecer um ObjectId)
+        if len(key) == 24 and all(c in '0123456789abcdef' for c in key):
+            emp = mongo()[COLL_FUNCIONARIOS].find_one({"_id": to_oid(key)}, {"_id": 1})
+            if emp: return emp.get("_id")
+
+        # 3. Tentar por nome completo
+        parts = key.split()
+        first_name_rx = {"$regex": f"^{re.escape(parts[0])}$", "$options": "i"}
+        
+        if len(parts) > 1:
+            last_name_rx = {"$regex": f"^{re.escape(parts[-1])}$", "$options": "i"}
+            query_full = {"nome": first_name_rx, "sobrenome": last_name_rx}
+            emp = mongo()[COLL_FUNCIONARIOS].find_one(query_full, {"_id": 1})
+            if emp: return emp.get("_id")
+        
+        # 4. Tentar por primeiro nome (APENAS se for um resultado único)
+        query_first = {"nome": first_name_rx}
+        emp_cursor = mongo()[COLL_FUNCIONARIOS].find(query_first, {"_id": 1})
+        emps = list(emp_cursor)
+        if len(emps) == 1: # Só retorna se for uma correspondência inequívoca
+            return emps[0].get("_id")
+
+        print(f"[_find_employee_id_by_name_sync] Não foi possível encontrar funcionário por '{key}'")
+        return None
+    except Exception as e:
+        print(f"Erro ao buscar ID de funcionário por nome: {e}")
+        return None
+
+def find_employee_with_least_tasks() -> Dict[str, Any]:
+    """
+    Encontra o funcionário com o MENOR número de tarefas (mínimo 1).
+    """
+    try:
+        pipeline = [
+            {"$match": {"responsavel": {"$exists": True, "$ne": None, "$ne": ""}}},
+            {"$group": {"_id": "$responsavel", "count": {"$sum": 1}}},
+            # A ÚNICA MUDANÇA É AQUI: 1 (ascendente)
+            {"$sort": {"count": 1}},
+            {"$limit": 1},
+            {"$lookup": {"from": COLL_FUNCIONARIOS, "localField": "_id", "foreignField": "_id", "as": "funcionario_doc"}},
+            {"$unwind": {"path": "$funcionario_doc", "preserveNullAndEmptyArrays": True}},
+            {"$project": {
+                "_id": 0,
+                "total_tarefas": "$count",
+                "nome_funcionario": {
+                    "$trim": {
+                        "input": {
+                            "$concat": [
+                                {"$ifNull": ["$funcionario_doc.nome", "(Funcionário não encontrado)"]},
+                                " ",
+                                {"$ifNull": ["$funcionario_doc.sobrenome", ""]}
+                            ]
+                        }
+                    }
+                }
+            }}
+        ]
+        result = list(mongo()[COLL_TAREFAS].aggregate(pipeline))
+        if not result:
+            return {"erro": "Não foi possível encontrar funcionários com tarefas (ou nenhuma tarefa está atribuída)."}
+        return result[0]
+    except Exception as e:
+        print(f"Erro ao buscar funcionário com menos tarefas: {e}")
+        return {"erro": str(e)}
+
+def find_employee_with_most_projects() -> Dict[str, Any]:
+    """
+    Encontra o funcionário com o MAIOR número de projetos.
+    """
+    try:
+        pipeline = [
+            {"$match": {"responsavel": {"$exists": True, "$ne": None, "$ne": ""}}},
+            {"$group": {"_id": "$responsavel", "count": {"$sum": 1}}},
+            {"$sort": {"count": -1}}, # -1 = Mais
+            {"$limit": 1},
+            {"$lookup": {"from": COLL_FUNCIONARIOS, "localField": "_id", "foreignField": "_id", "as": "funcionario_doc"}},
+            {"$unwind": {"path": "$funcionario_doc", "preserveNullAndEmptyArrays": True}},
+            {"$project": {
+                "_id": 0,
+                "total_projetos": "$count", # <- Mudei o nome da chave
+                "nome_funcionario": {
+                    "$trim": {
+                        "input": {
+                            "$concat": [
+                                {"$ifNull": ["$funcionario_doc.nome", "(Funcionário não encontrado)"]},
+                                " ",
+                                {"$ifNull": ["$funcionario_doc.sobrenome", ""]}
+                            ]
+                        }
+                    }
+                }
+            }}
+        ]
+        # MUDANÇA AQUI: Consulta COLL_PROJETOS
+        result = list(mongo()[COLL_PROJETOS].aggregate(pipeline))
+        if not result:
+            return {"erro": "Não foi possível encontrar funcionários com projetos (ou nenhum projeto está atribuído)."}
+        return result[0]
+    except Exception as e:
+        print(f"Erro ao buscar funcionário com mais projetos: {e}")
+        return {"erro": str(e)}
+
+def find_employee_with_least_projects() -> Dict[str, Any]:
+    """
+    Encontra o funcionário com o MENOR número de projetos (mínimo 1).
+    """
+    try:
+        pipeline = [
+            {"$match": {"responsavel": {"$exists": True, "$ne": None, "$ne": ""}}},
+            {"$group": {"_id": "$responsavel", "count": {"$sum": 1}}},
+            {"$sort": {"count": 1}}, # 1 = Menos
+            {"$limit": 1},
+            {"$lookup": {"from": COLL_FUNCIONARIOS, "localField": "_id", "foreignField": "_id", "as": "funcionario_doc"}},
+            {"$unwind": {"path": "$funcionario_doc", "preserveNullAndEmptyArrays": True}},
+            {"$project": {
+                "_id": 0,
+                "total_projetos": "$count", # <- Mudei o nome da chave
+                "nome_funcionario": {
+                    "$trim": {
+                        "input": {
+                            "$concat": [
+                                {"$ifNull": ["$funcionario_doc.nome", "(Funcionário não encontrado)"]},
+                                " ",
+                                {"$ifNull": ["$funcionario_doc.sobrenome", ""]}
+                            ]
+                        }
+                    }
+                }
+            }}
+        ]
+        # MUDANÇA AQUI: Consulta COLL_PROJETOS
+        result = list(mongo()[COLL_PROJETOS].aggregate(pipeline))
+        if not result:
+            return {"erro": "Não foi possível encontrar funcionários com projetos (ou nenhum projeto está atribuído)."}
+        return result[0]
+    except Exception as e:
+        print(f"Erro ao buscar funcionário com menos projetos: {e}")
+        return {"erro": str(e)}
+
+def count_tasks_by_employee_name(employee_name: str) -> Dict[str, Any]:
+    """
+    Conta o número de tarefas de um funcionário específico, buscando-o pelo nome.
+    """
+    emp_id = _find_employee_id_by_name_sync(employee_name)
+    if not emp_id:
+        return {"erro": f"Funcionário '{employee_name}' não encontrado."}
+    
+    try:
+        # Pega o nome formatado (para o caso de "eu" ser usado)
+        emp_doc = mongo()[COLL_FUNCIONARIOS].find_one({"_id": emp_id}, {"nome": 1, "sobrenome": 1})
+        nome_fmt = f"{emp_doc.get('nome', '')} {emp_doc.get('sobrenome', '')}".strip()
+        
+        count = mongo()[COLL_TAREFAS].count_documents(
+            {"responsavel": DBRef(collection=COLL_FUNCIONARIOS, id=emp_id)}
+        )
+        return {"nome_funcionario": nome_fmt, "total_tarefas": count}
+    except Exception as e:
+        return {"erro": str(e)}
+
+def count_projects_by_employee_name(employee_name: str) -> Dict[str, Any]:
+    """
+    Conta o número de projetos de um funcionário específico, buscando-o pelo nome.
+    """
+    emp_id = _find_employee_id_by_name_sync(employee_name)
+    if not emp_id:
+        return {"erro": f"Funcionário '{employee_name}' não encontrado."}
+    
+    try:
+        # Pega o nome formatado
+        emp_doc = mongo()[COLL_FUNCIONARIOS].find_one({"_id": emp_id}, {"nome": 1, "sobrenome": 1})
+        nome_fmt = f"{emp_doc.get('nome', '')} {emp_doc.get('sobrenome', '')}".strip()
+        
+        count = mongo()[COLL_PROJETOS].count_documents(
+            {"responsavel": DBRef(collection=COLL_FUNCIONARIOS, id=emp_id)}
+        )
+        return {"nome_funcionario": nome_fmt, "total_projetos": count}
+    except Exception as e:
+        return {"erro": str(e)}
+
 def count_projects_by_status(status: str) -> int:
     status_norm = (status or "").strip()
     if not status_norm: return 0
@@ -1152,8 +1400,7 @@ async def solve_enigma_from_xlsx_url_impl(url: str) -> str:
 
 def toolset() -> Tool:
     fns = [
-        FunctionDeclaration(name="count_all_projects", description="Conta e retorna o número total de projetos.", parameters={"type": "object", "properties": {}}),
-        FunctionDeclaration(name="count_all_tasks", description="Conta e retorna o número total de tarefas.", parameters={"type": "object", "properties": {}}),
+        FunctionDeclaration(name="count_all_projects", description="Conta e retorna o número total de projetos na base de dados (IGNORA o contexto de funcionário). Use para 'quantos projetos existem?' ou 'qual o total de projetos?'.", parameters={"type": "object", "properties": {}}),        FunctionDeclaration(name="count_all_tasks", description="Conta e retorna o número total de tarefas.", parameters={"type": "object", "properties": {}}),
         FunctionDeclaration(name="count_projects_by_status", description="Conta e retorna o número de projetos por status (ex: 'em andamento').", parameters={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}),
         FunctionDeclaration(name="list_all_projects", description="Lista todos os projetos.", parameters={"type": "object", "properties": {}}),
         FunctionDeclaration(name="list_all_tasks", description="Lista todas as tarefas.", parameters={"type": "object", "properties": {}}),
@@ -1177,16 +1424,15 @@ def toolset() -> Tool:
         FunctionDeclaration(name="get_pdf_content_from_url", description="Extrai e retorna todo o texto de um arquivo PDF hospedado em uma URL. Use isso para 'ler' ou 'analisar' um PDF.", parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
         FunctionDeclaration(name="solve_pdf_enigma_from_url", description="Encontra uma 'frase secreta' escondida em um PDF (letras maiúsculas fora de lugar) a partir de uma URL.", parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
 
-        FunctionDeclaration(
-            name="get_pdf_content_from_xlsx_url", 
-            description="Extrai o texto de um PDF que está LINKADO DENTRO de um arquivo .xlsx ou Google Sheets. Use se o usuário fornecer uma URL de planilham, mas pedir para 'ler o PDF' ou 'resumir o PDF'.", 
-            parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}
-        ),
-        FunctionDeclaration(
-            name="solve_enigma_from_xlsx_url", 
-            description="Resolve um enigma de um PDF que está LINKADO DENTRO de um arquivo .xlsx ou Google Sheets. Use se o usuário fornecer uma URL de planilha e pedir o 'enigma' ou 'frase secreta'.", 
-            parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}
-        ),
+        FunctionDeclaration(name="find_employee_with_most_tasks", description="Encontra o funcionário (colaborador) que possui o maior número de tarefas atribuídas e retorna o nome do funcionário e a contagem total de tarefas.", parameters={"type": "object", "properties": {}}),
+        FunctionDeclaration(name="find_employee_with_least_tasks", description="Encontra o funcionário (colaborador) com o MENOR número de tarefas atribuídas (mínimo 1).", parameters={"type": "object", "properties": {}}),
+        FunctionDeclaration(name="find_employee_with_most_projects", description="Encontra o funcionário (colaborador) com o MAIOR número de projetos atribuídos.", parameters={"type": "object", "properties": {}}),
+        FunctionDeclaration(name="find_employee_with_least_projects", description="Encontra o funcionário (colaborador) com o MENOR número de projetos atribuídos (mínimo 1).", parameters={"type": "object", "properties": {}}),
+        FunctionDeclaration(name="count_tasks_by_employee_name", description="Conta o número total de tarefas de um funcionário específico (buscando por nome ou email).", parameters={"type": "object", "properties": {"employee_name": {"type": "string"}}, "required": ["employee_name"]}),
+        FunctionDeclaration(name="count_projects_by_employee_name", description="Conta o número de projetos de um funcionário específico. Use APENAS se um nome de funcionário for mencionado na pergunta ou no contexto imediato.", parameters={"type": "object", "properties": {"employee_name": {"type": "string"}}, "required": ["employee_name"]}),
+        
+        FunctionDeclaration(name="get_pdf_content_from_xlsx_url", description="Extrai o texto de um PDF que está LINKADO DENTRO de um arquivo .xlsx ou Google Sheets. Use se o usuário fornecer uma URL de planilham, mas pedir para 'ler o PDF' ou 'resumir o PDF'.", parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
+        FunctionDeclaration(name="solve_enigma_from_xlsx_url", description="Resolve um enigma de um PDF que está LINKADO DENTRO de um arquivo .xlsx ou Google Sheets. Use se o usuário fornecer uma URL de planilha e pedir o 'enigma' ou 'frase secreta'.", parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
     ]
     return Tool(function_declarations=fns)
 
@@ -1214,6 +1460,13 @@ async def exec_tool(name: str, args: Dict[str, Any], user_id: Optional[str] = No
         if name == "update_task": return {"ok": True, "data": await update_task(**args)}               
         if name == "import_project_from_url": return {"ok": True, "data": await import_project_from_url_tool(**args, user_id=user_id)}
         
+        if name == "find_employee_with_most_tasks": return {"ok": True, "data": find_employee_with_most_tasks()}
+        if name == "find_employee_with_least_tasks": return {"ok": True, "data": find_employee_with_least_tasks()}
+        if name == "find_employee_with_most_projects": return {"ok": True, "data": find_employee_with_most_projects()}
+        if name == "find_employee_with_least_projects": return {"ok": True, "data": find_employee_with_least_projects()}
+        if name == "count_tasks_by_employee_name": return {"ok": True, "data": count_tasks_by_employee_name(args["employee_name"])}
+        if name == "count_projects_by_employee_name": return {"ok": True, "data": count_projects_by_employee_name(args["employee_name"])}
+
         if name == "get_pdf_content_from_url": return {"ok": True, "data": await get_pdf_content_from_url_impl(args["url"])}
         if name == "solve_pdf_enigma_from_url": return {"ok": True, "data": await solve_pdf_enigma_from_url_impl(args["url"])}
 
