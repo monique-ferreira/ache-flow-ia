@@ -941,33 +941,56 @@ def find_employee_with_most_tasks() -> Dict[str, Any]:
 def _find_employee_id_by_name_sync(name_or_email: str) -> Optional[ObjectId]:
     """
     Helper SÍNCRONO para encontrar o ID de um funcionário no MongoDB
-    pelo nome, sobrenome, nome completo ou email.
+    pelo nome, sobrenome, nome completo ou email. (Versão 2 - Corrigida)
     """
     key = (name_or_email or "").strip().lower()
     if not key: return None
     
     try:
-        # 1. Tentar por email (correspondência exata, insensível)
+        # 1. Tentar por email (sem-mudança)
         query_email = {"email": {"$regex": f"^{re.escape(key)}$", "$options": "i"}}
         emp = mongo()[COLL_FUNCIONARIOS].find_one(query_email, {"_id": 1})
         if emp: return emp.get("_id")
 
-        # 2. Tentar por ID (se parecer um ObjectId)
+        # 2. Tentar por ID (sem-mudança)
         if len(key) == 24 and all(c in '0123456789abcdef' for c in key):
             emp = mongo()[COLL_FUNCIONARIOS].find_one({"_id": to_oid(key)}, {"_id": 1})
             if emp: return emp.get("_id")
 
-        # 3. Tentar por nome completo
+        # 3. Tentar por nome completo (LÓGICA CORRIGIDA)
         parts = key.split()
-        first_name_rx = {"$regex": f"^{re.escape(parts[0])}$", "$options": "i"}
-        
         if len(parts) > 1:
-            last_name_rx = {"$regex": f"^{re.escape(parts[-1])}$", "$options": "i"}
-            query_full = {"nome": first_name_rx, "sobrenome": last_name_rx}
-            emp = mongo()[COLL_FUNCIONARIOS].find_one(query_full, {"_id": 1})
-            if emp: return emp.get("_id")
-        
+            # --- INÍCIO DA CORREÇÃO ---
+            
+            # Tentativa 1 (Mais Comum): "Nome Composto" "Sobrenome"
+            # Ex: "Ana Luiza" (nome) "Dourado" (sobrenome)
+            nome_parts_1 = parts[:-1]  # Tudo exceto o último
+            nome_str_1 = " ".join(nome_parts_1)
+            sobrenome_str_1 = parts[-1] # Apenas o último
+            
+            nome_rx_1 = {"$regex": f"^{re.escape(nome_str_1)}$", "$options": "i"}
+            sobrenome_rx_1 = {"$regex": f"^{re.escape(sobrenome_str_1)}$", "$options": "i"}
+
+            query_full_1 = {"nome": nome_rx_1, "sobrenome": sobrenome_rx_1}
+            emp_1 = mongo()[COLL_FUNCIONARIOS].find_one(query_full_1, {"_id": 1})
+            if emp_1: return emp_1.get("_id")
+            
+            # Tentativa 2 (Fallback): "Nome" "Sobrenome Composto"
+            # Ex: "Ana" (nome) "Luiza Dourado" (sobrenome)
+            if len(parts) > 2: # Só tenta se houver nome do meio
+                nome_str_2 = parts[0] # Apenas o primeiro
+                sobrenome_str_2 = " ".join(parts[1:]) # Todo o resto
+                
+                nome_rx_2 = {"$regex": f"^{re.escape(nome_str_2)}$", "$options": "i"}
+                sobrenome_rx_2 = {"$regex": f"^{re.escape(sobrenome_str_2)}$", "$options": "i"}
+                
+                query_full_2 = {"nome": nome_rx_2, "sobrenome": sobrenome_rx_2}
+                emp_2 = mongo()[COLL_FUNCIONARIOS].find_one(query_full_2, {"_id": 1})
+                if emp_2: return emp_2.get("_id")
+            # --- FIM DA CORREÇÃO ---
+
         # 4. Tentar por primeiro nome (APENAS se for um resultado único)
+        first_name_rx = {"$regex": f"^{re.escape(parts[0])}$", "$options": "i"}
         query_first = {"nome": first_name_rx}
         emp_cursor = mongo()[COLL_FUNCIONARIOS].find(query_first, {"_id": 1})
         emps = list(emp_cursor)
@@ -979,7 +1002,141 @@ def _find_employee_id_by_name_sync(name_or_email: str) -> Optional[ObjectId]:
     except Exception as e:
         print(f"Erro ao buscar ID de funcionário por nome: {e}")
         return None
+    
+def _get_employee_doc_by_name(name_or_email: str) -> Optional[Dict[str, Any]]:
+    """
+    Helper síncrono para buscar o DOCUMENTO COMPLETO de um funcionário.
+    Reutiliza a lógica de busca por ID.
+    """
+    emp_id = _find_employee_id_by_name_sync(name_or_email)
+    if not emp_id:
+        return None
+    try:
+        # Retorna o documento completo (sem 'sanitize_doc' ainda)
+        return mongo()[COLL_FUNCIONARIOS].find_one({"_id": emp_id})
+    except Exception as e:
+        print(f"Erro ao buscar documento completo do funcionário: {e}")
+        return None
 
+def get_employee_email(employee_name: str) -> Dict[str, Any]:
+    """
+    Encontra o email de um funcionário específico.
+    """
+    emp_doc = _get_employee_doc_by_name(employee_name)
+    if not emp_doc:
+        return {"erro": f"Funcionário '{employee_name}' não encontrado."}
+    
+    return {
+        "nome": f"{emp_doc.get('nome', '')} {emp_doc.get('sobrenome', '')}".strip(),
+        "email": emp_doc.get("email", "Email não informado")
+    }
+
+def get_employee_position(employee_name: str) -> Dict[str, Any]:
+    """
+    Encontra o cargo de um funcionário específico.
+    (Assume que o campo se chama 'cargo')
+    """
+    emp_doc = _get_employee_doc_by_name(employee_name)
+    if not emp_doc:
+        return {"erro": f"Funcionário '{employee_name}' não encontrado."}
+    
+    return {
+        "nome": f"{emp_doc.get('nome', '')} {emp_doc.get('sobrenome', '')}".strip(),
+        "cargo": emp_doc.get("cargo", "Cargo não informado")
+    }
+
+def get_employee_department(employee_name: str) -> Dict[str, Any]:
+    """
+    Encontra o departamento de um funcionário específico.
+    (Assume que o campo se chama 'departamento')
+    """
+    emp_doc = _get_employee_doc_by_name(employee_name)
+    if not emp_doc:
+        return {"erro": f"Funcionário '{employee_name}' não encontrado."}
+    
+    return {
+        "nome": f"{emp_doc.get('nome', '')} {emp_doc.get('sobrenome', '')}".strip(),
+        "departamento": emp_doc.get("departamento", "Departamento não informado")
+    }
+
+def get_employee_tenure(employee_name: str) -> Dict[str, Any]:
+    """
+    Calcula o tempo de casa (preciso) e retorna a data de admissão.
+    (Versão V3: Unificada + Cálculo de dias)
+    """
+    emp_doc = _get_employee_doc_by_name(employee_name)
+    if not emp_doc:
+        return {"erro": f"Funcionário '{employee_name}' não encontrado."}
+
+    nome_fmt = f"{emp_doc.get('nome', '')} {emp_doc.get('sobrenome', '')}".strip()
+    
+    data_admissao_val = emp_doc.get("dataCadastro") 
+    
+    if not data_admissao_val:
+        return {"nome": nome_fmt, "tempo_de_casa": "Data de cadastro não informada"}
+
+    try:
+        # Converte para 'date' (ignora hora/fuso)
+        if isinstance(data_admissao_val, datetime):
+            start_date = data_admissao_val.date()
+        else:
+            start_date = datetime.fromisoformat(str(data_admissao_val).split("T")[0]).date()
+        
+        today = datetime.utcnow().date()
+        delta = today - start_date
+        
+        if delta.days < 0:
+            return {
+                "nome": nome_fmt, 
+                "tempo_de_casa": f"ainda não começou",
+                "data_admissao": start_date.strftime('%d/%m/%Y'),
+                "data_admissao_iso": start_date.isoformat()
+            }
+        
+        if delta.days == 0:
+            return {
+                "nome": nome_fmt, 
+                "tempo_de_casa": "começou hoje",
+                "data_admissao": start_date.strftime('%d/%m/%Y'),
+                "data_admissao_iso": start_date.isoformat()
+            }
+
+        anos = delta.days // 365
+        dias_restantes_ano = delta.days % 365
+        meses = dias_restantes_ano // 30  # Aproximação, mas consistente
+        dias = dias_restantes_ano % 30
+
+        parts = []
+        if anos > 1: parts.append(f"{anos} anos")
+        elif anos == 1: parts.append("1 ano")
+
+        if meses > 1: parts.append(f"{meses} meses")
+        elif meses == 1: parts.append("1 mês")
+
+        if dias > 1: parts.append(f"{dias} dias")
+        elif dias == 1: parts.append("1 dia")
+
+        tenure_str = ""
+        if len(parts) == 0:
+            tenure_str = "começou hoje"
+        elif len(parts) == 1:
+            tenure_str = parts[0]
+        elif len(parts) == 2:
+            tenure_str = f"{parts[0]} e {parts[1]}"
+        else: # 3 partes (anos, meses, dias)
+            tenure_str = f"{parts[0]}, {parts[1]} e {parts[2]}"
+        
+        return {
+            "nome": nome_fmt, 
+            "tempo_de_casa": tenure_str,
+            "data_admissao": start_date.strftime('%d/%m/%Y'), # Formato da imagem 2
+            "data_admissao_iso": start_date.isoformat()
+        }
+    
+    except Exception as e:
+        print(f"Erro ao calcular tempo de casa para {nome_fmt}: {e}")
+        return {"nome": nome_fmt, "tempo_de_casa": f"Data de cadastro inválida ({data_admissao_val})"}
+        
 def find_employee_with_least_tasks() -> Dict[str, Any]:
     """
     Encontra o funcionário com o MENOR número de tarefas (mínimo 1).
@@ -1431,6 +1588,11 @@ def toolset() -> Tool:
         FunctionDeclaration(name="count_tasks_by_employee_name", description="Conta o número total de tarefas de um funcionário específico (buscando por nome ou email).", parameters={"type": "object", "properties": {"employee_name": {"type": "string"}}, "required": ["employee_name"]}),
         FunctionDeclaration(name="count_projects_by_employee_name", description="Conta o número de projetos de um funcionário específico. Use APENAS se um nome de funcionário for mencionado na pergunta ou no contexto imediato.", parameters={"type": "object", "properties": {"employee_name": {"type": "string"}}, "required": ["employee_name"]}),
         
+        FunctionDeclaration(name="get_employee_email", description="Encontra e retorna o email de um funcionário específico (buscando por nome).", parameters={"type": "object", "properties": {"employee_name": {"type": "string"}}, "required": ["employee_name"]}),
+        FunctionDeclaration(name="get_employee_position", description="Encontra e retorna o cargo (posição) de um funcionário específico (buscando por nome).", parameters={"type": "object", "properties": {"employee_name": {"type": "string"}}, "required": ["employee_name"]}),
+        FunctionDeclaration(name="get_employee_department", description="Encontra e retorna o departamento (área) de um funcionário específico (buscando por nome).", parameters={"type": "object", "properties": {"employee_name": {"type": "string"}}, "required": ["employee_name"]}),
+        FunctionDeclaration(name="get_employee_tenure", description="Busca o tempo de casa E a data de admissão de um funcionário. A ferramenta retorna DOIS campos: 'tempo_de_casa' (ex: '1 mês e 21 dias') e 'data_admissao' (ex: '16/09/2025'). Use o campo apropriado para a pergunta do usuário.", parameters={"type": "object", "properties": {"employee_name": {"type": "string"}}, "required": ["employee_name"]}),
+        
         FunctionDeclaration(name="get_pdf_content_from_xlsx_url", description="Extrai o texto de um PDF que está LINKADO DENTRO de um arquivo .xlsx ou Google Sheets. Use se o usuário fornecer uma URL de planilham, mas pedir para 'ler o PDF' ou 'resumir o PDF'.", parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
         FunctionDeclaration(name="solve_enigma_from_xlsx_url", description="Resolve um enigma de um PDF que está LINKADO DENTRO de um arquivo .xlsx ou Google Sheets. Use se o usuário fornecer uma URL de planilha e pedir o 'enigma' ou 'frase secreta'.", parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
     ]
@@ -1466,6 +1628,11 @@ async def exec_tool(name: str, args: Dict[str, Any], user_id: Optional[str] = No
         if name == "find_employee_with_least_projects": return {"ok": True, "data": find_employee_with_least_projects()}
         if name == "count_tasks_by_employee_name": return {"ok": True, "data": count_tasks_by_employee_name(args["employee_name"])}
         if name == "count_projects_by_employee_name": return {"ok": True, "data": count_projects_by_employee_name(args["employee_name"])}
+
+        if name == "get_employee_email": return {"ok": True, "data": get_employee_email(args["employee_name"])}
+        if name == "get_employee_position": return {"ok": True, "data": get_employee_position(args["employee_name"])}
+        if name == "get_employee_department": return {"ok": True, "data": get_employee_department(args["employee_name"])}
+        if name == "get_employee_tenure": return {"ok": True, "data": get_employee_tenure(args["employee_name"])}
 
         if name == "get_pdf_content_from_url": return {"ok": True, "data": await get_pdf_content_from_url_impl(args["url"])}
         if name == "solve_pdf_enigma_from_url": return {"ok": True, "data": await solve_pdf_enigma_from_url_impl(args["url"])}
