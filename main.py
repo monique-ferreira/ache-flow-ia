@@ -2510,45 +2510,83 @@ async def ai_chat_with_xlsx(
                     tool_steps.append({"call": "import_from_file", "args": params, "result": {"error": detail}})    
         
         elif intention == "rag" and not task_name:
-            print(f"[DEBUG-V19] Intenção: RAG GERAL (sobre o XLSX). Pergunta: {pergunta}")
+            print(f"[DEBUG-V19-FIXED] Intenção: RAG GERAL. Tentando PDF primeiro. Pergunta: {pergunta}")
             
-            # 1. Converter DF para texto (CSV)
-            xlsx_text_content = df.to_csv(index=False)
-            if not xlsx_text_content.strip():
-                 raise HTTPException(status_code=400, detail="O arquivo XLSX parece estar vazio ou não pude lê-lo.")
+            pdf_url = None
+            pdf_content_raw = None
+            
+            # 1. Tentar encontrar o primeiro PDF válido
+            if "Documento Referência" in df.columns:
+                for url in df["Documento Referência"]:
+                    if url and str(url).lower().startswith("http"):
+                        pdf_url = str(url)
+                        break # Encontramos o primeiro
+            
+            # 2. Se encontrou um PDF, tentar baixá-lo
+            if pdf_url:
+                try:
+                    print(f"[DEBUG-V19-FIXED] PDF encontrado ({pdf_url}). Baixando...")
+                    pdf_content_raw = await get_pdf_content_from_url_impl(pdf_url)
+                    if not pdf_content_raw or "Erro ao processar PDF" in pdf_content_raw:
+                        print(f"[DEBUG-V19-FIXED] Falha ao baixar ou ler o PDF. Fallback para CSV.")
+                        pdf_content_raw = None # Força o fallback
+                except Exception as e_pdf:
+                    print(f"[DEBUG-V19-FIXED] Exceção ao baixar PDF: {e_pdf}. Fallback para CSV.")
+                    pdf_content_raw = None
 
-            # 2. Salvar no Contexto (para follow-ups)
+            # 3. Definir o conteúdo para RAG e Contexto
+            context_type = ""
+            text_content_for_rag = ""
+            text_content_for_context = "" # Texto bruto (para enigma)
+            
+            if pdf_content_raw:
+                # SUCESSO: Usar o conteúdo do PDF
+                print("[DEBUG-V19-FIXED] Usando conteúdo do PDF para RAG.")
+                context_type = "pdf_from_xlsx"
+                text_content_for_rag = clean_pdf_text(pdf_content_raw)
+                text_content_for_context = pdf_content_raw
+                rag_prompt_context_desc = "PDF (encontrado no primeiro link da planilha)"
+            else:
+                print("[DEBUG-V19-FIXED] Usando conteúdo do CSV para RAG.")
+                context_type = "xlsx"
+                csv_text = df.to_csv(index=False)
+                if not csv_text.strip():
+                    raise HTTPException(status_code=400, detail="O arquivo XLSX parece estar vazio ou não pude lê-lo.")
+                text_content_for_rag = csv_text
+                text_content_for_context = csv_text
+                rag_prompt_context_desc = "CSV (da planilha, pois não foi encontrado PDF)"
+
+            # 4. Salvar no Contexto (Agora unificado)
             try:
                 db = mongo()
                 db[COLL_CONTEXTOS].update_one(
                     {"user_id": id_usuario_fmt},
                     {"$set": {
                         "user_id": id_usuario_fmt,
-                        "context_type": "xlsx",
-                        "text_content": xlsx_text_content, # (CSV) Para RAG futuro
-                        "binary_content": xlsx_bytes,    # (Bytes) Para IMPORTAÇÃO futura
+                        "context_type": context_type,
+                        "text_content": text_content_for_context,
+                        "binary_content": xlsx_bytes,
                         "filename": file.filename,
                         "updated_at": today()
                     }},
                     upsert=True
                 )
-                print(f"[Context-V19] Contexto XLSX GERAL (Texto+Binário) salvo para {id_usuario_fmt} (Arquivo: {file.filename}).")
+                print(f"[Context-V19-FIXED] Contexto {context_type} salvo para {id_usuario_fmt} (Arquivo: {file.filename}).")
             except Exception as e:
-                print(f"[Context-V19] FALHA ao salvar contexto XLSX GERAL para {id_usuario_fmt}: {e}")
+                print(f"[Context-V19-FIXED] FALHA ao salvar contexto {context_type} para {id_usuario_fmt}: {e}")
 
-            # 3. Preparar RAG Prompt
+            # 5. Preparar RAG Prompt (Agora unificado)
             rag_prompt = f"""
-            Use o CONTEÚDO DO DOCUMENTO XLSX abaixo (formatado como CSV) para responder a PERGUNTA DO USUÁRIO.
+            Use o CONTEÚDO DO DOCUMENTO abaixo (formato {rag_prompt_context_desc}) para responder a PERGUNTA DO USUÁRIO.
             Responda APENAS com base no CONTEÚDO DO DOCUMENTO.
 
-            ==================== CONTEÚDO DO DOCUMENTO (CSV) ====================
-            {xlsx_text_content[:10000]} 
+            ==================== CONTEÚDO DO DOCUMENTO ====================
+            {text_content_for_rag[:10000]} 
             =====================================================================
 
             PERGUNTA DO USUÁRIO: {pergunta}
             """
             
-            # 4. Chamar Gemini (reutilizando a lógica do RAG de PDF)
             data_hoje, (inicio_mes, fim_mes) = iso_date(today()), month_bounds(today())
             system_prompt_filled = SYSTEM_PROMPT.format(
                 nome_usuario=nome_usuario_fmt, 
@@ -2563,7 +2601,7 @@ async def ai_chat_with_xlsx(
                 final_answer = getattr(rag_resp.candidates[0].content.parts[0], "text", "Não encontrei a resposta no documento.")
             else:
                 final_answer = "Não encontrei a resposta no documento."
-            tool_steps.append({"call": "RAG_on_XLSX_General", "args": {"pergunta": pergunta}, "result": final_answer})
+            tool_steps.append({"call": "RAG_on_XLSX_General", "args": {"pergunta": pergunta, "context_used": context_type}, "result": final_answer})
         
         elif not task_names:
             raise HTTPException(status_code=400, detail="A intenção não era 'importar', mas a planilha não tem uma coluna 'Nome' para que eu possa ler as tarefas.")
