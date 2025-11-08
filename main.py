@@ -64,6 +64,26 @@ class TitleRequest(BaseModel):
 class TitleResponse(BaseModel):
     title: str
 
+class BulkTaskItem(BaseModel):
+    nome: str
+    projeto_id: str
+    responsavel_id: Optional[str] = None # Será preenchido pelo user_id se for nulo
+    descricao: Optional[str] = None
+    prioridade: Optional[str] = 'média'
+    status: str
+    prazo: Optional[str] = None
+    numero: Optional[str] = None
+    classificacao: Optional[str] = None
+    fase: Optional[str] = None
+    condicao: Optional[str] = None
+    documento_referencia: Optional[str] = None
+    concluido: Optional[bool] = False
+    percentual_concluido: Optional[float] = 0.0
+
+class BulkTaskRequest(BaseModel):
+    tasks: List[BulkTaskItem]
+    user_id: Optional[str] = None
+
 # =========================
 # Config
 # =========================
@@ -2900,8 +2920,30 @@ async def ai_chat_with_xlsx(
                     
                     print("[DEBUG-V17-CLEANUP] Chamando IA (Gemini) para limpeza ESTRITA (Lógica Inline)...")
                     
+                    # ==================================
+                    # INÍCIO DA CORREÇÃO (V2)
+                    # ==================================
+                    # Re-inicializa 'model' para usar o prompt de sistema completo
+                    
+                    data_hoje, (inicio_mes, fim_mes) = iso_date(today()), month_bounds(today())
+                    system_prompt_filled = SYSTEM_PROMPT.format(
+                        nome_usuario=nome_usuario_fmt, 
+                        email_usuario=email_usuario_fmt, 
+                        id_usuario=id_usuario_fmt,
+                        data_hoje=data_hoje, inicio_mes=inicio_mes, fim_mes=fim_mes,
+                    )
+                    
+                    # Substitui o modelo de roteamento pelo modelo completo
+                    model = init_model(system_prompt_filled) 
+                    # ==================================
+                    
                     cleanup_contents = [Content(role="user", parts=[Part.from_text(cleanup_prompt)])]
-                    cleanup_resp = model.generate_content(cleanup_contents, tools=[])
+                    
+                    # <<< CORREÇÃO: Agora 'model' é o modelo correto e completo
+                    cleanup_resp = model.generate_content(cleanup_contents, tools=[]) 
+                    # ==================================
+                    # FIM DA CORREÇÃO (V2)
+                    # ==================================
                                     
                     cleaned_result = ""
                     if cleanup_resp.candidates and cleanup_resp.candidates[0].content and cleanup_resp.candidates[0].content.parts:
@@ -2917,7 +2959,7 @@ async def ai_chat_with_xlsx(
                         final_answer = f"A frase secreta encontrada no PDF da tarefa '{task_name}' é: {cleaned_result}"
                 tool_steps.append({"call": "solve_pdf_enigma_from_text", "args": {"task": task_name}, "result": result})
 
-            else:
+            else: # (intention == "rag")
                 print(f"[DEBUG-V17] Processando RAG a partir de texto baixado...")
                                 
                 pdf_content = clean_pdf_text(pdf_content_raw)
@@ -2943,6 +2985,7 @@ async def ai_chat_with_xlsx(
                 else:
                     final_answer = "Não encontrei a resposta no documento."
                 tool_steps.append({"call": "RAG_on_XLSX_PDF", "args": {"url": pdf_url, "pergunta": pergunta}, "result": final_answer})
+        
         final_answer_fmt = _normalize_answer(final_answer, nome_usuario_fmt)
         response_data = {
             "tipo_resposta": "TEXTO_XLSX",
@@ -2953,7 +2996,7 @@ async def ai_chat_with_xlsx(
 
     except Exception as e:
         raise e
-            
+                
 @app.post("/pdf/extract-text")
 async def pdf_extract_text(file: UploadFile = File(...), _ = Depends(require_api_key)):
     """
@@ -3087,6 +3130,51 @@ async def create_task_with_logic(
             except Exception: 
                 detail = e.response.text
         raise HTTPException(status_code=422, detail=detail)
+
+@app.post("/tasks/create-bulk-from-json")
+async def create_tasks_bulk_json(
+    req: BulkTaskRequest,
+    _ = Depends(require_api_key)
+):
+    """
+    Novo endpoint: Recebe uma lista de tarefas pré-processadas (JSON)
+    e as cria em paralelo.
+    """
+    async with httpx.AsyncClient() as client:
+        create_task_coroutines = []
+        task_payloads_for_error_tracking = []
+        
+        # Resolve o ID do responsável padrão (o usuário que enviou)
+        default_resp_id = await resolve_responsavel_id(client, None, default_user_id=req.user_id)
+
+        for task in req.tasks:
+            payload = task.dict()
+            
+            # Garante que a tarefa tenha um responsável
+            if not payload.get("responsavel_id"):
+                 payload["responsavel_id"] = default_resp_id
+            
+            if not payload.get("projeto_id"):
+                raise HTTPException(status_code=400, detail=f"Tarefa '{payload.get('nome')}' está sem projeto_id.")
+            
+            task_payloads_for_error_tracking.append(payload)
+            # Reutiliza a função de criação individual (que já tem a lógica de RAG do PDF)
+            create_task_coroutines.append(
+                create_task_api(client, payload)
+            )
+
+        print(f"[Import-JSON] Criando {len(create_task_coroutines)} tarefas em paralelo no Render...")
+        results = await asyncio.gather(*create_task_coroutines, return_exceptions=True)
+        print("[Import-JSON] Criação de tarefas concluída.")
+
+        created, errors = [], []
+        for idx, res in enumerate(results):
+            if isinstance(res, Exception):
+                errors.append({"erro": str(res), "titulo": task_payloads_for_error_tracking[idx]["nome"]})
+            else:
+                created.append(res)
+                
+    return {"projeto_id": req.tasks[0].projeto_id if req.tasks else None, "criados": created, "total": len(created), "erros": errors}
 
 @app.get("/")
 def root():
