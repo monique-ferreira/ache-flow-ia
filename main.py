@@ -350,29 +350,14 @@ async def resolve_descricao_pdf_async(row) -> str:
 
 def _parse_percent_robust(percent_str: Any) -> float:
     """
-    Converte um valor de porcentagem (str, None, "0,95", "50%", "50", etc) 
+    Converte um valor de porcentagem (str, None, "0,95", etc) 
     para um float limpo (ex: 0.95).
     """
     try:
-        # Limpa a string (remove espaços, troca vírgula, remove %)
-        s = str(percent_str or "0").strip().replace(",", ".")
-        
-        if s.endswith("%"):
-            s = s[:-1]
-        
-        # Converte para float
-        val = float(s)
-        
-        # Se o valor for > 1 (ex: 50), assume que é 50% e divide por 100.
-        if val > 1.0:
-            val = val / 100.0
-        
-        # Garante que está no range [0.0, 1.0]
-        return max(0.0, min(1.0, val))
-        
+        return float(str(percent_str or "0").replace(",", "."))
     except ValueError:
         return 0.0
-    
+
 def _map_percent_to_status(percent_float: float) -> str:
     """
     Converte um float (0.0 a 1.0) 
@@ -920,24 +905,7 @@ async def tasks_from_xlsx_logic(
 
             percent_float = _parse_percent_robust(percent_raw)
 
-            status_options = ['não iniciada', 'em andamento', 'concluída', 'congelada']
-            explicit_status_raw = str(row.get("Status") or "").strip().lower()
-            explicit_status = explicit_status_raw if explicit_status_raw in status_options else None
-            
-            # Deriva o status da porcentagem
-            derived_status = _map_percent_to_status(percent_float)
-            
-            # Prioriza o status explícito, se houver
-            status_calculado = explicit_status or derived_status
-            
-            # Sincroniza a porcentagem com o status explícito (se existir)
-            if explicit_status == "concluída" and percent_float < 1.0:
-                percent_float = 1.0
-            elif explicit_status == "não iniciada" and percent_float > 0.0:
-                percent_float = 0.0
-            elif explicit_status == "congelada":
-                 # Mantém a porcentagem, mas garante o status
-                 status_calculado = "congelada"
+            status_calculado = _map_percent_to_status(percent_float)
 
             payload = {
                 "nome": str(row["Nome"]),
