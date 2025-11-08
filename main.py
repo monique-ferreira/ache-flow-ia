@@ -284,6 +284,103 @@ def _find_task_id_by_name_sync(task_name: str, project_name: str) -> Optional[st
         print(f"Erro ao buscar task ID por nome: {e}")
         return None
 
+PDF_TEXT_CACHE: Dict[str, str] = {}
+PDF_TEXT_CACHE_LOCK = asyncio.Lock()
+
+async def get_pdf_text_from_url_cached(url: str) -> str:
+    """
+    Helper com cache para buscar e extrair texto de PDF de forma assíncrona,
+    sem bloquear o loop de eventos.
+    """
+    if not url or "http" not in url:
+        return ""
+    
+    if url in PDF_TEXT_CACHE:
+        return PDF_TEXT_CACHE[url]
+
+    async with PDF_TEXT_CACHE_LOCK:
+        if url in PDF_TEXT_CACHE:
+            return PDF_TEXT_CACHE[url]
+        
+        try:
+            print(f"[Cache-Helper] Cache MISS para: {url}")
+            
+            pdf_bytes = await asyncio.to_thread(fetch_pdf_bytes, url)
+            
+            full_pdf_text = await asyncio.to_thread(extract_full_pdf_text, pdf_bytes)
+            
+            PDF_TEXT_CACHE[url] = full_pdf_text
+            return full_pdf_text
+        except Exception as e:
+            print(f"[Cache-Helper] Falha ao processar PDF da URL {url}: {e}")
+            PDF_TEXT_CACHE[url] = "" 
+            return ""
+
+async def resolve_descricao_pdf_async(row) -> str:
+    """
+    Versão assíncrona do 'resolve_descricao_pdf' que usa o helper de cache.
+    """
+    como = str(row.get("Como Fazer") or "").strip()
+    docrf = str(row.get("Documento Referência") or "").strip()
+    
+    if not como or not docrf or not re.search(r"(?i)\b((?:Doc\.?\s*)?(Texto\.?\d+))\b\.?", como): 
+        return como
+    
+    try: 
+        full_pdf_text = await get_pdf_text_from_url_cached(docrf)
+        
+        if not full_pdf_text.strip():
+            print(f"[DEBUG] PDF {docrf} não retornou texto. Usando '{como}' como fallback.")
+            return como
+    except Exception as e:
+        print(f"[DEBUG] Falha ao processar PDF {docrf}: {e}. Usando '{como}' como fallback.")
+        return como
+
+    def _repl(m: re.Match) -> str:
+        full_token, anchor = m.group(1), m.group(2)
+        extracted = clean_pdf_text(extract_after_anchor_from_pdf(full_pdf_text, anchor))
+        return extracted if extracted else full_token
+    
+    return re.sub(r"(?i)\b((?:Doc\.?\s*)?(Texto\.?\d+))\b\.?", _repl, como)
+
+def _parse_percent_robust(percent_str: Any) -> float:
+    """
+    Converte um valor de porcentagem (str, None, "0,95", "50%", "50", etc) 
+    para um float limpo (ex: 0.95).
+    """
+    try:
+        # Limpa a string (remove espaços, troca vírgula, remove %)
+        s = str(percent_str or "0").strip().replace(",", ".")
+        
+        if s.endswith("%"):
+            s = s[:-1]
+        
+        # Converte para float
+        val = float(s)
+        
+        # Se o valor for > 1 (ex: 50), assume que é 50% e divide por 100.
+        if val > 1.0:
+            val = val / 100.0
+        
+        # Garante que está no range [0.0, 1.0]
+        return max(0.0, min(1.0, val))
+        
+    except ValueError:
+        return 0.0
+    
+def _map_percent_to_status(percent_float: float) -> str:
+    """
+    Converte um float (0.0 a 1.0) 
+    em um status de tarefa ('não iniciada', 'em andamento', 'concluída').
+    
+    (MODIFICADO para receber um float limpo, não mais 'Any')
+    """
+    if percent_float >= 1.0:
+        return "concluída"
+    if percent_float > 0.0:
+        return "em andamento"
+    return "não iniciada"
+
 # =========================
 # Helpers de Download (PDF/XLSX)
 # =========================
@@ -545,11 +642,48 @@ async def create_project_api(client: httpx.AsyncClient, data: Dict[str, Any]) ->
 async def create_task_api(client: httpx.AsyncClient, data: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{TASKS_API_BASE}{TASKS_API_TASKS_PATH}"
     auth_headers = await get_api_auth_headers(client, use_json=True)
-    payload = pick(data, ["nome", "projeto_id", "responsavel_id", "descricao", "prioridade", "status", "prazo", "documento_referencia", "concluido"])
+    descricao_raw = data.get("descricao")
+    doc_ref_raw = data.get("documento_referencia")
+    descricao_final = descricao_raw 
+    if (descricao_raw and 
+        "Texto." in descricao_raw and 
+        doc_ref_raw and 
+        "http" in doc_ref_raw):
+        print(f"[create_task_api] LOG 1: Tentativa de RAG detectada. Desc: '{descricao_raw}', Doc: '{doc_ref_raw}'")
+        try:
+            print(f"[create_task_api] LOG 2: Baixando PDF de '{doc_ref_raw}'...")
+            pdf_bytes = fetch_pdf_bytes(doc_ref_raw)
+            print(f"[create_task_api] LOG 3: PDF baixado ({len(pdf_bytes)} bytes). Extraindo texto...")
+            full_pdf_text = extract_full_pdf_text(pdf_bytes)
+            if full_pdf_text.strip():
+                print(f"[create_task_api] LOG 4: Texto extraído. Amostra: '{full_pdf_text.strip()[:50]}...'")
+                def _repl(m: re.Match) -> str:
+                    full_token, anchor = m.group(1), m.group(2)
+                    print(f"[create_task_api] LOG 5: Buscando âncora '{anchor}' no PDF...")
+                    extracted = clean_pdf_text(extract_after_anchor_from_pdf(full_pdf_text, anchor))
+                    if extracted:
+                        print(f"[create_task_api] LOG 6: Âncora '{anchor}' encontrada. Texto: '{extracted[:50]}...'")
+                        return extracted
+                    else:
+                        print(f"[create_task_api] LOG 6-ERRO: Âncora '{anchor}' NÃO encontrada no PDF.")
+                        return full_token
+                nova_descricao = re.sub(r"(?i)\b((?:Doc\.?\s*)?(Texto\.?\d+))\b\.?", _repl, descricao_raw)
+                descricao_final = nova_descricao
+            else:
+                 print(f"[create_task_api] LOG 4-ERRO: PDF baixado de {doc_ref_raw} não retornou texto. Usando descrição original.")
+        except Exception as e:
+            print(f"[create_task_api] LOG X-FALHA: FALHA ao tentar resolver PDF: {e}")
+    data["descricao"] = descricao_final
+
+    payload = pick(data, ["nome", "projeto_id", "responsavel_id", "descricao", "prioridade", "status", "prazo", "documento_referencia", "concluido", "classificacao", "fase", "condicao", "percentual_concluido"])
+    
     payload = {k: v for k, v in payload.items() if v is not None}
+    print(f"[create_task_api] LOG 7: Enviando payload final para o Render: {payload}")
     r = await client.post(url, json=payload, headers=auth_headers, timeout=TIMEOUT_S)
     if r.status_code not in (200, 201):
+        print(f"[create_task_api] LOG 8-ERRO: API do Render rejeitou o payload. Status: {r.status_code}, Resposta: {r.text}")
         raise httpx.HTTPStatusError(f"Erro da API do Render: {r.status_code}", request=r.request, response=r)
+    print(f"[create_task_api] LOG 9: Tarefa criada com sucesso no Render.")
     return sanitize_doc(r.json())
 
 async def find_project_id_by_name(client: httpx.AsyncClient, projeto_nome: str) -> Optional[str]:
@@ -655,7 +789,8 @@ async def tasks_from_xlsx_logic(
         if file_bytes:
             df = xlsx_bytes_to_dataframe_preserving_hyperlinks(file_bytes)
         elif xlsx_url:
-            xbytes = fetch_bytes(xlsx_url) 
+            # Executa o download síncrono em uma thread
+            xbytes = await asyncio.to_thread(fetch_bytes, xlsx_url) 
             df = xlsx_bytes_to_dataframe_preserving_hyperlinks(xbytes)
         else:
             raise HTTPException(status_code=400, detail={"erro": "Nenhuma fonte de dados (file, xlsx_url, google_sheet_url) fornecida."})
@@ -666,10 +801,18 @@ async def tasks_from_xlsx_logic(
     if not required.issubset(df.columns):
         missing = required - set(df.columns)
         raise HTTPException(status_code=400, detail={"erro": f"Colunas faltando: {', '.join(missing)}"})
-    df["descricao_final"] = df.apply(resolve_descricao_pdf, axis=1)
-    preview: List[Dict[str, Any]] = []
+
+    # ---------------------------------------------------------
+    # MUDANÇA 1: PREPARAR COROTINAS DE RAG
+    # ---------------------------------------------------------
+    # ⛔️ REMOVIDO: df["descricao_final"] = df.apply(resolve_descricao_pdf, axis=1)
+
+    preview_rows_data = [] # Para guardar dados da linha e prazo
+    rag_coroutines = []      # Para guardar as tarefas de RAG
+
     latest_task_date: Optional[datetime.date] = None
     today_date = datetime.utcnow().date()
+
     for _, row in df.iterrows():
         prazo_col = str(row.get("Prazo") or "").strip()
         task_date_obj: Optional[datetime.date] = None
@@ -685,22 +828,36 @@ async def tasks_from_xlsx_logic(
                 n = int(m.group(1)) if m else 7; task_date_obj = today_date + timedelta(days=n)
             except Exception: task_date_obj = today_date + timedelta(days=7)
             prazo_col = task_date_obj.isoformat()
+        
         if latest_task_date is None or task_date_obj > latest_task_date:
             latest_task_date = task_date_obj
-        preview.append({
-            "titulo": str(row["Nome"]),
-            "descricao": str(row.get("descricao_final") or ""),
-            "responsavel": str(row.get("Responsavel") or ""), # <-- Isso será IGNORADO (propositalmente)
-            "doc_ref": str(row.get("Documento Referência") or "").strip(),
-            "prazo": prazo_col,
-        })
+        
+        # Guarda os dados da linha para usar depois
+        preview_rows_data.append({"row": row, "prazo_calculado": prazo_col})
+        # Adiciona a corotina de RAG à lista (ainda não executa)
+        rag_coroutines.append(resolve_descricao_pdf_async(row))
+
+    # ---------------------------------------------------------
+    # MUDANÇA 2: EXECUTAR RAG EM PARALELO
+    # ---------------------------------------------------------
+    print(f"[Import] Executando {len(rag_coroutines)} RAGs de PDF em paralelo...")
+    # Aqui todo o download e processamento de PDF acontece concorrentemente
+    resolved_descriptions = await asyncio.gather(*rag_coroutines)
+    print("[Import] RAGs concluídos.")
+
+    # ---------------------------------------------------------
+    # MUDANÇA 3: LÓGICA DO PROJETO E RESPONSÁVEL (Como antes)
+    # ---------------------------------------------------------
     if not projeto_id and not projeto_nome:
         raise HTTPException(status_code=400, detail={"erro": "Para importar, forneça 'projeto_id' ou 'projeto_nome'."})
+
     async with httpx.AsyncClient() as client:
         proj_resp_id_unificado = await resolve_responsavel_id(client, projeto_responsavel, default_user_id=user_id)
+        
         resolved_project_id: Optional[str] = projeto_id
         if not resolved_project_id and projeto_nome:
             resolved_project_id = await find_project_id_by_name(client, projeto_nome)
+        
         if not resolved_project_id:
             if create_project_flag and projeto_nome:
                 proj_prazo = (projeto_prazo or "").strip()
@@ -715,19 +872,79 @@ async def tasks_from_xlsx_logic(
                 resolved_project_id = proj.get("_id") or proj.get("id")
             else:
                 raise HTTPException(status_code=404, detail={"erro": f"Projeto '{projeto_nome}' não encontrado. Para criar, envie 'create_project_flag=1'."})
+
+        # ---------------------------------------------------------
+        # MUDANÇA 4: PREPARAR COROTINAS DE CRIAÇÃO
+        # ---------------------------------------------------------
+        create_task_coroutines = []
+        task_payloads_for_error_tracking = []
+
+        for idx, item_data in enumerate(preview_rows_data):
+            row = item_data["row"]
+            
+            percent_raw = row.get("% Concluída")
+
+            percent_float = _parse_percent_robust(percent_raw)
+
+            status_options = ['não iniciada', 'em andamento', 'concluída', 'congelada']
+            explicit_status_raw = str(row.get("Status") or "").strip().lower()
+            explicit_status = explicit_status_raw if explicit_status_raw in status_options else None
+            
+            # Deriva o status da porcentagem
+            derived_status = _map_percent_to_status(percent_float)
+            
+            # Prioriza o status explícito, se houver
+            status_calculado = explicit_status or derived_status
+            
+            # Sincroniza a porcentagem com o status explícito (se existir)
+            if explicit_status == "concluída" and percent_float < 1.0:
+                percent_float = 1.0
+            elif explicit_status == "não iniciada" and percent_float > 0.0:
+                percent_float = 0.0
+            elif explicit_status == "congelada":
+                 # Mantém a porcentagem, mas garante o status
+                 status_calculado = "congelada"
+
+            payload = {
+                "nome": str(row["Nome"]),
+                "descricao": resolved_descriptions[idx], # Usa a descrição resolvida
+                "projeto_id": resolved_project_id, 
+                "responsavel_id": proj_resp_id_unificado,
+                "prazo": item_data["prazo_calculado"],
+                "documento_referencia": str(row.get("Documento Referência") or "").strip(),
+                "status": status_calculado,
+                "percentual_concluido": percent_float,
+                "classificacao": str(row.get("Categoria") or "").strip(),
+                "fase": str(row.get("Fase") or "").strip(),
+                "condicao": str(row.get("Condição") or "").strip()
+            }   
+            
+            task_payloads_for_error_tracking.append(payload)
+            # Adiciona a corotina de criação à lista (ainda não executa)
+            create_task_coroutines.append(
+                create_task_api(client, payload)
+            )
+
+        # ---------------------------------------------------------
+        # MUDANÇA 5: EXECUTAR CRIAÇÃO EM PARALELO
+        # ---------------------------------------------------------
+        print(f"[Import] Criando {len(create_task_coroutines)} tarefas em paralelo no Render...")
+        # Aqui todas as chamadas à API do Render acontecem concorrentemente
+        # return_exceptions=True garante que uma falha não pare todo o lote
+        results = await asyncio.gather(*create_task_coroutines, return_exceptions=True)
+        print("[Import] Criação de tarefas concluída.")
+
+        # ---------------------------------------------------------
+        # MUDANÇA 6: PROCESSAR RESULTADOS
+        # ---------------------------------------------------------
         created, errors = [], []
-        for item in preview:            
-            try:
-                created.append(await create_task_api(client, {
-                    "nome": item["titulo"], "descricao": item["descricao"],
-                    "projeto_id": resolved_project_id, 
-                    "responsavel_id": proj_resp_id_unificado, # <-- MUDANÇA 4: Usar ID unificado
-                    "prazo": item["prazo"],
-                    "documento_referencia": item["doc_ref"],
-                    "status": "não iniciada", "prioridade": "média"
-                }))
-            except Exception as e:
-                errors.append({"erro": str(e), "titulo": item["titulo"]})
+        for idx, res in enumerate(results):
+            if isinstance(res, Exception):
+                # Se for uma exceção, registra o erro
+                errors.append({"erro": str(res), "titulo": task_payloads_for_error_tracking[idx]["nome"]})
+            else:
+                # Se for um sucesso, adiciona aos criados
+                created.append(res)
                 
     return {"mode": "assigned", "projeto_id": resolved_project_id, "criados": created, "total": len(created), "erros": errors}
 
@@ -1367,7 +1584,7 @@ async def update_task(
 
         auth_headers = await get_api_auth_headers(client, use_json=True)
         
-        allowed = {"nome", "descricao", "prioridade", "status", "prazo", "projeto_id"}
+        allowed = {"nome", "descricao", "prioridade", "status", "prazo", "projeto_id", "classificacao", "fase", "condicao", "percentual_concluido"}
         payload = {k: v for k, v in patch.items() if k in allowed and v is not None}
         
         if "prazo" in patch and patch["prazo"]:
@@ -2828,6 +3045,48 @@ async def ai_generate_title(req: TitleRequest, _=Depends(require_api_key)):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao gerar título: {str(e)}")
+
+class TaskPayload(BaseModel):
+    nome: str
+    projeto_id: str
+    responsavel_id: str
+    descricao: Optional[str] = None
+    prioridade: Optional[str] = "média"
+    status: str = "não iniciada"
+    prazo: str
+    numero: Optional[str] = None
+    classificacao: Optional[str] = None
+    fase: Optional[str] = None
+    condicao: Optional[str] = None
+    documento_referencia: Optional[str] = None
+    concluido: Optional[bool] = False
+    percentual_concluido: Optional[float] = None
+
+@app.post("/tasks/create-with-logic")
+async def create_task_with_logic(
+    payload: TaskPayload,
+    _ = Depends(require_api_key)
+):
+    """
+    NOVO ENDPOINT: Cria uma tarefa única, mas aplica a lógica 
+    de substituição de PDF antes de salvá-la no Render.
+    """
+    try:
+        data_dict = payload.dict() 
+
+        async with httpx.AsyncClient() as client:
+            result = await create_task_api(client, data_dict) 
+            return result
+
+    except Exception as e:
+        detail = str(e)
+        if isinstance(e, httpx.HTTPStatusError):
+            try: 
+                err_json = e.response.json()
+                detail = err_json.get("detail", err_json.get("erro", str(e)))
+            except Exception: 
+                detail = e.response.text
+        raise HTTPException(status_code=422, detail=detail)
 
 @app.get("/")
 def root():
