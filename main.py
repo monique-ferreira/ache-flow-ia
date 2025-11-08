@@ -343,6 +343,29 @@ async def resolve_descricao_pdf_async(row) -> str:
     
     return re.sub(r"(?i)\b((?:Doc\.?\s*)?(Texto\.?\d+))\b\.?", _repl, como)
 
+def _parse_percent_robust(percent_str: Any) -> float:
+    """
+    Converte um valor de porcentagem (str, None, "0,95", etc) 
+    para um float limpo (ex: 0.95).
+    """
+    try:
+        return float(str(percent_str or "0").replace(",", "."))
+    except ValueError:
+        return 0.0
+
+def _map_percent_to_status(percent_float: float) -> str:
+    """
+    Converte um float (0.0 a 1.0) 
+    em um status de tarefa ('não iniciada', 'em andamento', 'concluída').
+    
+    (MODIFICADO para receber um float limpo, não mais 'Any')
+    """
+    if percent_float >= 1.0:
+        return "concluída"
+    if percent_float > 0.0:
+        return "em andamento"
+    return "não iniciada"
+
 # =========================
 # Helpers de Download (PDF/XLSX)
 # =========================
@@ -636,7 +659,9 @@ async def create_task_api(client: httpx.AsyncClient, data: Dict[str, Any]) -> Di
         except Exception as e:
             print(f"[create_task_api] LOG X-FALHA: FALHA ao tentar resolver PDF: {e}")
     data["descricao"] = descricao_final
-    payload = pick(data, ["nome", "projeto_id", "responsavel_id", "descricao", "prioridade", "status", "prazo", "documento_referencia", "concluido"])
+
+    payload = pick(data, ["nome", "projeto_id", "responsavel_id", "descricao", "prioridade", "status", "prazo", "documento_referencia", "concluido", "classificacao", "fase", "condicao", "percentual_concluido"])
+    
     payload = {k: v for k, v in payload.items() if v is not None}
     print(f"[create_task_api] LOG 7: Enviando payload final para o Render: {payload}")
     r = await client.post(url, json=payload, headers=auth_headers, timeout=TIMEOUT_S)
@@ -842,6 +867,12 @@ async def tasks_from_xlsx_logic(
         for idx, item_data in enumerate(preview_rows_data):
             row = item_data["row"]
             
+            percent_raw = row.get("% Concluída")
+
+            percent_float = _parse_percent_robust(percent_raw)
+
+            status_calculado = _map_percent_to_status(percent_float)
+
             payload = {
                 "nome": str(row["Nome"]),
                 "descricao": resolved_descriptions[idx], # Usa a descrição resolvida
@@ -849,8 +880,12 @@ async def tasks_from_xlsx_logic(
                 "responsavel_id": proj_resp_id_unificado,
                 "prazo": item_data["prazo_calculado"],
                 "documento_referencia": str(row.get("Documento Referência") or "").strip(),
-                "status": "não iniciada", "prioridade": "média"
-            }
+                "status": status_calculado,
+                "percentual_concluido": percent_float,
+                "classificacao": str(row.get("Categoria") or "").strip(),
+                "fase": str(row.get("Fase") or "").strip(),
+                "condicao": str(row.get("Condição") or "").strip()
+            }   
             
             task_payloads_for_error_tracking.append(payload)
             # Adiciona a corotina de criação à lista (ainda não executa)
@@ -1517,7 +1552,7 @@ async def update_task(
 
         auth_headers = await get_api_auth_headers(client, use_json=True)
         
-        allowed = {"nome", "descricao", "prioridade", "status", "prazo", "projeto_id"}
+        allowed = {"nome", "descricao", "prioridade", "status", "prazo", "projeto_id", "classificacao", "fase", "condicao", "percentual_concluido"}
         payload = {k: v for k, v in patch.items() if k in allowed and v is not None}
         
         if "prazo" in patch and patch["prazo"]:
@@ -2993,6 +3028,7 @@ class TaskPayload(BaseModel):
     condicao: Optional[str] = None
     documento_referencia: Optional[str] = None
     concluido: Optional[bool] = False
+    percentual_concluido: Optional[float] = None
 
 @app.post("/tasks/create-with-logic")
 async def create_task_with_logic(
