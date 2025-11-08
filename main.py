@@ -315,20 +315,24 @@ async def get_pdf_text_from_url_cached(url: str) -> str:
     if not url or "http" not in url:
         return ""
     
+    # 1. VERIFICA SE A URL JÁ ESTÁ NO CACHE
     if url in PDF_TEXT_CACHE:
         return PDF_TEXT_CACHE[url]
 
     async with PDF_TEXT_CACHE_LOCK:
+        # 2. Segunda verificação (caso outra tarefa tenha preenchido o cache enquanto esta esperava o lock)
         if url in PDF_TEXT_CACHE:
             return PDF_TEXT_CACHE[url]
         
         try:
             print(f"[Cache-Helper] Cache MISS para: {url}")
             
+            # 3. SE NÃO ESTÁ NO CACHE, FAZ O DOWNLOAD (APENAS UMA VEZ)
             pdf_bytes = await asyncio.to_thread(fetch_pdf_bytes, url)
             
             full_pdf_text = await asyncio.to_thread(extract_full_pdf_text, pdf_bytes)
             
+            # 4. ARMAZENA O RESULTADO NO CACHE
             PDF_TEXT_CACHE[url] = full_pdf_text
             return full_pdf_text
         except Exception as e:
@@ -347,6 +351,7 @@ async def resolve_descricao_pdf_async(row) -> str:
         return como
     
     try: 
+        # Esta função buscará no cache primeiro
         full_pdf_text = await get_pdf_text_from_url_cached(docrf)
         
         if not full_pdf_text.strip():
@@ -671,10 +676,9 @@ async def create_task_api(client: httpx.AsyncClient, data: Dict[str, Any]) -> Di
         "http" in doc_ref_raw):
         print(f"[create_task_api] LOG 1: Tentativa de RAG detectada. Desc: '{descricao_raw}', Doc: '{doc_ref_raw}'")
         try:
-            print(f"[create_task_api] LOG 2: Baixando PDF de '{doc_ref_raw}'...")
-            pdf_bytes = fetch_pdf_bytes(doc_ref_raw)
-            print(f"[create_task_api] LOG 3: PDF baixado ({len(pdf_bytes)} bytes). Extraindo texto...")
-            full_pdf_text = extract_full_pdf_text(pdf_bytes)
+            print(f"[create_task_api] LOG 2: Buscando PDF (com cache) de '{doc_ref_raw}'...")
+            full_pdf_text = await get_pdf_text_from_url_cached(doc_ref_raw)
+            print(f"[create_task_api] LOG 3: PDF obtido (do cache ou download).")
             if full_pdf_text.strip():
                 print(f"[create_task_api] LOG 4: Texto extraído. Amostra: '{full_pdf_text.strip()[:50]}...'")
                 def _repl(m: re.Match) -> str:
@@ -822,16 +826,13 @@ async def tasks_from_xlsx_logic(
         missing = required - set(df.columns)
         raise HTTPException(status_code=400, detail={"erro": f"Colunas faltando: {', '.join(missing)}"})
 
+   # ---------------------------------------------------------
+    # MUDANÇA 1: PREPARAR DADOS DE LINHA E PRAZO
     # ---------------------------------------------------------
-    # MUDANÇA 1: PREPARAR COROTINAS DE RAG
-    # ---------------------------------------------------------
-    # ⛔️ REMOVIDO: df["descricao_final"] = df.apply(resolve_descricao_pdf, axis=1)
-
     preview_rows_data = [] # Para guardar dados da linha e prazo
-    rag_coroutines = []      # Para guardar as tarefas de RAG
-
     latest_task_date: Optional[datetime.date] = None
     today_date = datetime.utcnow().date()
+    first_pdf_url: Optional[str] = None
 
     for _, row in df.iterrows():
         prazo_col = str(row.get("Prazo") or "").strip()
@@ -854,16 +855,49 @@ async def tasks_from_xlsx_logic(
         
         # Guarda os dados da linha para usar depois
         preview_rows_data.append({"row": row, "prazo_calculado": prazo_col})
-        # Adiciona a corotina de RAG à lista (ainda não executa)
-        rag_coroutines.append(resolve_descricao_pdf_async(row))
+        
+        # Captura a URL do PDF da primeira linha (conforme solicitado)
+        if first_pdf_url is None:
+            first_pdf_url = str(row.get("Documento Referência") or "").strip()
+            if not first_pdf_url.lower().startswith("http"):
+                first_pdf_url = None # Ignora se não for um link válido
 
     # ---------------------------------------------------------
-    # MUDANÇA 2: EXECUTAR RAG EM PARALELO
+    # MUDANÇA 2: EXECUTAR RAG (DOWNLOAD ÚNICO)
     # ---------------------------------------------------------
-    print(f"[Import] Executando {len(rag_coroutines)} RAGs de PDF em paralelo...")
-    # Aqui todo o download e processamento de PDF acontece concorrentemente
-    resolved_descriptions = await asyncio.gather(*rag_coroutines)
-    print("[Import] RAGs concluídos.")
+    print(f"[Import] Otimização ativada. Verificando PDF da primeira linha: {first_pdf_url}")
+    full_pdf_text = ""
+    if first_pdf_url:
+        # Baixa o PDF (ou pega do cache) APENAS UMA VEZ
+        full_pdf_text = await get_pdf_text_from_url_cached(first_pdf_url)
+        if full_pdf_text:
+            print(f"[Import] PDF ({first_pdf_url}) baixado e cacheado com sucesso.")
+        else:
+            print(f"[Import] PDF ({first_pdf_url}) não retornou texto. Descrições usarão fallback.")
+
+    resolved_descriptions = []
+    for item_data in preview_rows_data:
+        row = item_data["row"]
+        como = str(row.get("Como Fazer") or "").strip()
+        docrf = str(row.get("Documento Referência") or "").strip()
+        
+        # Se a linha atual usa o MESMO PDF que a primeira linha E o PDF foi carregado
+        if docrf == first_pdf_url and full_pdf_text:
+            # Usa o texto já baixado (full_pdf_text) para fazer a substituição
+            def _repl(m: re.Match) -> str:
+                full_token, anchor = m.group(1), m.group(2)
+                extracted = clean_pdf_text(extract_after_anchor_from_pdf(full_pdf_text, anchor))
+                return extracted if extracted else full_token
+            
+            resolved_descriptions.append(
+                re.sub(r"(?i)\b((?:Doc\.?\s*)?(Texto\.?\d+))\b\.?", _repl, como)
+            )
+        else:
+            # Fallback: usa a descrição original ("Como Fazer")
+            # (Se o PDF falhou ou se esta linha usa um PDF *diferente*)
+            resolved_descriptions.append(como)
+    
+    print("[Import] Processamento de descrições (RAG) concluído.")
 
     # ---------------------------------------------------------
     # MUDANÇA 3: LÓGICA DO PROJETO E RESPONSÁVEL (Como antes)
@@ -927,8 +961,7 @@ async def tasks_from_xlsx_logic(
 
             payload = {
                 "nome": str(row["Nome"]),
-                "descricao": resolved_descriptions[idx], # Usa a descrição resolvida
-                "projeto_id": resolved_project_id, 
+                "descricao": resolved_descriptions[idx], # Usa a descrição resolvida (do cache)                "projeto_id": resolved_project_id, 
                 "responsavel_id": proj_resp_id_unificado,
                 "prazo": item_data["prazo_calculado"],
                 "documento_referencia": str(row.get("Documento Referência") or "").strip(),
